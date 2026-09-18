@@ -31,6 +31,12 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     let layerStack = LayoutView()
     let layerScroll = NSScrollView()
     let layerOpacity = FluentSlider(vertical: false, min: 0, max: 100, value: 100)
+    let tabStrip = TabStrip(frame: .zero)
+    let toolbox = ToolboxView(frame: .zero)
+    let classicPalette = ClassicPalette(frame: .zero)
+    let classicMenu = ClassicMenuBar(frame: .zero)
+    let classicStatus = ClassicStatusBar(frame: .zero)
+    var ribbonTab = 0
 
     var groups: [RibbonGroup] = []
     var toolButtons: [PaintTool: RibbonButton] = [:]
@@ -55,6 +61,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         super.init(window: window)
+        if let saved = UserDefaults.standard.string(forKey: "paint.skin"),
+           let restored = Skin(rawValue: saved) { Fluent.skin = restored }
         window.title = "未命名 - 小畫家"
         window.minSize = NSSize(width: 1160, height: 700)
         window.appearance = NSAppearance(named: .aqua)
@@ -107,30 +115,77 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         return container
     }
 
+    // MARK: Chrome assembly
+
     func buildChrome() {
         guard let content = window?.contentView else { return }
-        root.background = Fluent.chrome
-        root.frame = content.bounds
-        root.autoresizingMask = [.width, .height]
-        content.addSubview(root)
+        if root.superview == nil {
+            root.frame = content.bounds
+            root.autoresizingMask = [.width, .height]
+            content.addSubview(root)
+        }
+        for view in root.subviews { view.removeFromSuperview() }
+        for view in ribbon.subviews { view.removeFromSuperview() }
+        for view in menuRow.subviews { view.removeFromSuperview() }
+        for view in workspace.subviews { view.removeFromSuperview() }
+        for view in layerPanel.subviews { view.removeFromSuperview() }
+        for view in tabStrip.subviews { view.removeFromSuperview() }
+        groups.removeAll()
+        toolButtons.removeAll()
 
+        root.background = Fluent.chrome
         menuRow.background = Fluent.chrome
+        menuRow.bottomBorder = nil
         ribbon.background = Fluent.chrome
         ribbon.bottomBorder = Fluent.chromeBorder
         workspace.background = Fluent.workspace
-        root.addSubview(menuRow)
-        root.addSubview(ribbon)
-        root.addSubview(workspace)
-        root.addSubview(statusBar)
 
-        buildMenuRow()
-        buildRibbon()
-        buildWorkspace()
-        buildStatusBar()
+        switch Fluent.skin.layout {
+        case .fluent:
+            root.addSubview(menuRow)
+            root.addSubview(ribbon)
+            root.addSubview(workspace)
+            root.addSubview(statusBar)
+            buildMenuRow()
+            buildRibbon()
+            buildWorkspace()
+            buildStatusBar()
+        case .ribbon:
+            root.addSubview(tabStrip)
+            root.addSubview(ribbon)
+            root.addSubview(workspace)
+            root.addSubview(statusBar)
+            buildTabStrip()
+            buildRibbon()
+            buildWorkspace()
+            buildStatusBar()
+        case .classic:
+            root.addSubview(classicMenu)
+            root.addSubview(workspace)
+            root.addSubview(classicPalette)
+            root.addSubview(classicStatus)
+            buildClassicMenu()
+            buildWorkspace()
+            buildClassicExtras()
+        }
         root.onLayout = { [weak self] in self?.layoutChrome() }
+        root.needsLayout = true
+        root.needsDisplay = true
     }
 
-    // MARK: Menu row
+    func applySkin(_ skin: Skin) {
+        guard skin != Fluent.skin else { return }
+        canvas.finishText()
+        Fluent.skin = skin
+        UserDefaults.standard.set(skin.rawValue, forKey: "paint.skin")
+        buildChrome()
+        buildMenu()
+        update()
+        selectTool(canvas.tool)
+        layoutChrome()
+    }
+
+    // MARK: Windows 11 menu row
 
     func buildMenuRow() {
         func textButton(_ title: String, _ builder: @escaping () -> NSMenu) -> RibbonButton {
@@ -161,67 +216,147 @@ final class PaintController: NSWindowController, NSWindowDelegate {
                 continue
             }
             button.setFrameOrigin(NSPoint(x: x, y: 5))
-            x += button.frame.width + (button.kind == .text ? 2 : 2)
+            x += button.frame.width + 2
             if button.caption == "檢視" { x += 10 }
         }
     }
 
-    // MARK: Ribbon
+    // MARK: Windows 10 / 7 tab strip
+
+    func buildTabStrip() {
+        tabStrip.tabs = ["常用", "檢視"]
+        tabStrip.activeIndex = ribbonTab
+        tabStrip.onFile = { [weak self] in
+            guard let self else { return }
+            self.fileMenu().popUp(positioning: nil, at: NSPoint(x: 2, y: self.tabStrip.bounds.maxY),
+                                  in: self.tabStrip)
+        }
+        tabStrip.onSelect = { [weak self] index in
+            guard let self else { return }
+            self.ribbonTab = index
+            for view in self.ribbon.subviews { view.removeFromSuperview() }
+            self.groups.removeAll()
+            self.toolButtons.removeAll()
+            self.buildRibbon()
+            self.selectTool(self.canvas.tool)
+            self.layoutChrome()
+        }
+        undoButton = iconButton(.undo, "復原 (⌘Z)", 28, 24) { [weak self] in self?.undoAction(nil) }
+        redoButton = iconButton(.redo, "重做 (⇧⌘Z)", 28, 24) { [weak self] in self?.redoAction(nil) }
+        let save = iconButton(.save, "儲存 (⌘S)", 28, 24) { [weak self] in _ = self?.save() }
+        let share = iconButton(.share, "分享", 28, 24) { [weak self] in self?.shareAction(nil) }
+        let settings = iconButton(.settings, "外觀設定", 28, 24) { [weak self] in self?.settingsAction(nil) }
+        for button in [save, share, undoButton!, redoButton!, settings] { tabStrip.addSubview(button) }
+    }
+
+    func layoutTabStrip() {
+        var x = tabStrip.bounds.width - 8
+        for subview in tabStrip.subviews.reversed() {
+            guard let button = subview as? RibbonButton else { continue }
+            x -= button.frame.width
+            button.setFrameOrigin(NSPoint(x: x, y: (tabStrip.bounds.height - button.frame.height) / 2))
+            x -= 2
+        }
+    }
+
+    // MARK: Ribbon groups
 
     func buildRibbon() {
-        // 選取項目
-        selectButton = RibbonButton(.selectRect, kind: .tall, chevron: true, width: 46, height: 52)
+        if Fluent.skin.layout == .ribbon && ribbonTab == 1 { buildViewTab(); return }
+        if Fluent.skin.layout == .ribbon { buildClipboardGroup() }
+        buildImageGroup()
+        buildToolsGroup()
+        buildBrushGroup()
+        buildShapesGroup()
+        if Fluent.skin.layout == .ribbon { buildSizeGroup() }
+        buildColorGroup()
+        if Fluent.skin.layout == .fluent { buildCopilotGroup() }
+        buildLayersGroup()
+    }
+
+    func buildClipboardGroup() {
+        let paste = RibbonButton(.duplicate, caption: "貼上", kind: .tall, chevron: true, width: 48, height: 60)
+        paste.glyphSize = 24
+        paste.onClick = { [weak self] in self?.pasteAction(nil) }
+        paste.setFrameOrigin(NSPoint(x: 8, y: 4))
+        let cut = RibbonButton(.crop, caption: "剪下", kind: .labelled, width: 62, height: 24)
+        cut.onClick = { [weak self] in self?.cutAction(nil) }
+        cut.setFrameOrigin(NSPoint(x: 58, y: 10))
+        let copy = RibbonButton(.duplicate, caption: "複製", kind: .labelled, width: 62, height: 24)
+        copy.onClick = { [weak self] in self?.copyAction(nil) }
+        copy.setFrameOrigin(NSPoint(x: 58, y: 38))
+        _ = group("剪貼簿", 130, [paste, cut, copy])
+    }
+
+    func buildImageGroup() {
+        selectButton = RibbonButton(.selectRect, caption: Fluent.skin.layout == .fluent ? "" : "選取",
+                                    kind: .tall, chevron: true, width: 48, height: 60)
         selectButton.glyphSize = 22
         selectButton.toolTip = "選取項目"
         selectButton.onClick = { [weak self] in self?.selectTool(.select) }
-        selectButton.setFrameOrigin(NSPoint(x: 8, y: 10))
+        selectButton.setFrameOrigin(NSPoint(x: 8, y: 4))
         toolButtons[.select] = selectButton
-        _ = group("選取項目", 62, [selectButton])
 
-        // 影像
-        let crop = iconButton(.crop, "裁剪") { [weak self] in self?.cropAction(nil) }
-        crop.setFrameOrigin(NSPoint(x: 8, y: 6))
-        let resize = iconButton(.resize, "調整大小和扭曲") { [weak self] in self?.resizeAction(nil) }
-        resize.setFrameOrigin(NSPoint(x: 8, y: 42))
-        let rotate = iconButton(.rotate, "旋轉", 46, 34, chevron: true) {}
-        rotate.menuBuilder = { [weak self] in self?.rotateMenu() ?? NSMenu() }
-        rotate.setFrameOrigin(NSPoint(x: 46, y: 6))
-        let flip = iconButton(.flip, "翻轉", 46, 34, chevron: true) {}
-        flip.menuBuilder = { [weak self] in self?.flipMenu() ?? NSMenu() }
-        flip.setFrameOrigin(NSPoint(x: 46, y: 42))
-        let cutout = iconButton(.removeBackground, "移除背景", 40, 40) { [weak self] in self?.removeBackground(nil) }
-        cutout.glyphSize = 22
-        cutout.setFrameOrigin(NSPoint(x: 98, y: 20))
-        _ = group("影像", 146, [crop, resize, rotate, flip, cutout])
+        if Fluent.skin.layout == .fluent {
+            _ = group("選取項目", 64, [selectButton])
+            let crop = iconButton(.crop, "裁剪") { [weak self] in self?.cropAction(nil) }
+            crop.setFrameOrigin(NSPoint(x: 8, y: 6))
+            let resize = iconButton(.resize, "調整大小和扭曲") { [weak self] in self?.resizeAction(nil) }
+            resize.setFrameOrigin(NSPoint(x: 8, y: 42))
+            let rotate = iconButton(.rotate, "旋轉", 46, 34, chevron: true) {}
+            rotate.menuBuilder = { [weak self] in self?.rotateMenu() ?? NSMenu() }
+            rotate.setFrameOrigin(NSPoint(x: 46, y: 6))
+            let flip = iconButton(.flip, "翻轉", 46, 34, chevron: true) {}
+            flip.menuBuilder = { [weak self] in self?.flipMenu() ?? NSMenu() }
+            flip.setFrameOrigin(NSPoint(x: 46, y: 42))
+            let cutout = iconButton(.removeBackground, "移除背景", 40, 40) { [weak self] in self?.removeBackground(nil) }
+            cutout.glyphSize = 22
+            cutout.setFrameOrigin(NSPoint(x: 98, y: 20))
+            _ = group("影像", 146, [crop, resize, rotate, flip, cutout])
+            return
+        }
+        let crop = RibbonButton(.crop, caption: "裁剪", kind: .labelled, width: 92, height: 22)
+        crop.onClick = { [weak self] in self?.cropAction(nil) }
+        crop.setFrameOrigin(NSPoint(x: 58, y: 6))
+        let resize = RibbonButton(.resize, caption: "調整大小", kind: .labelled, width: 92, height: 22)
+        resize.onClick = { [weak self] in self?.resizeAction(nil) }
+        resize.setFrameOrigin(NSPoint(x: 58, y: 30))
+        let rotate = RibbonButton(.rotate, caption: "旋轉", kind: .labelled, chevron: true, width: 92, height: 22)
+        rotate.menuBuilder = { [weak self] in self?.rotateFlipMenu() ?? NSMenu() }
+        rotate.setFrameOrigin(NSPoint(x: 58, y: 54))
+        _ = group("影像", 158, [selectButton, crop, resize, rotate])
+    }
 
-        // 工具
-        var toolViews: [NSView] = []
-        let toolGrid: [PaintTool] = [.pencil, .fill, .text, .eraser, .picker, .magnifier]
-        for (index, tool) in toolGrid.enumerated() {
+    func buildToolsGroup() {
+        var views: [NSView] = []
+        let grid: [PaintTool] = [.pencil, .fill, .text, .eraser, .picker, .magnifier]
+        for (index, tool) in grid.enumerated() {
             let button = RibbonButton(tool.glyph, kind: .grid, width: 34, height: 34)
             button.glyphSize = 18
             button.toolTip = tool.rawValue
             button.onClick = { [weak self] in self?.selectTool(tool) }
             button.setFrameOrigin(NSPoint(x: 8 + CGFloat(index % 3) * 35, y: 6 + CGFloat(index / 3) * 36))
             toolButtons[tool] = button
-            toolViews.append(button)
+            views.append(button)
         }
-        _ = group("工具", 119, toolViews)
+        _ = group("工具", 119, views)
+    }
 
-        // 筆刷
-        brushButton = RibbonButton(PaintTool.brush.glyph, kind: .tall, chevron: false, width: 46, height: 46)
+    func buildBrushGroup() {
+        brushButton = RibbonButton(activeBrush.glyph, kind: .tall, chevron: false, width: 46, height: 46)
         brushButton.glyphSize = 22
         brushButton.toolTip = "筆刷"
         brushButton.onClick = { [weak self] in guard let self else { return }; self.selectTool(self.activeBrush) }
         brushButton.setFrameOrigin(NSPoint(x: 8, y: 8))
-        let brushChevron = RibbonButton(.chevron, kind: .grid, width: 46, height: 18)
-        brushChevron.glyphSize = 11
-        brushChevron.toolTip = "選擇筆刷"
-        brushChevron.menuBuilder = { [weak self] in self?.brushMenu() ?? NSMenu() }
-        brushChevron.setFrameOrigin(NSPoint(x: 8, y: 54))
-        _ = group("筆刷", 62, [brushButton, brushChevron])
+        let chevron = RibbonButton(.chevron, kind: .grid, width: 46, height: 18)
+        chevron.glyphSize = 11
+        chevron.toolTip = "選擇筆刷"
+        chevron.menuBuilder = { [weak self] in self?.brushMenu() ?? NSMenu() }
+        chevron.setFrameOrigin(NSPoint(x: 8, y: 54))
+        _ = group("筆刷", 62, [brushButton, chevron])
+    }
 
-        // 形狀
+    func buildShapesGroup() {
         gallery.frame = NSRect(x: 8, y: 6, width: 138, height: 72)
         gallery.onSelect = { [weak self] tool in self?.selectTool(tool) }
         outlineButton = iconButton(.outline, "外框", 46, 34, chevron: true) {}
@@ -231,8 +366,17 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         fillButton.menuBuilder = { [weak self] in self?.fillMenu() ?? NSMenu() }
         fillButton.setFrameOrigin(NSPoint(x: 152, y: 42))
         _ = group("形狀", 206, [gallery, outlineButton, fillButton])
+    }
 
-        // 色彩
+    func buildSizeGroup() {
+        let size = RibbonButton(.thickness, caption: "大小", kind: .tall, chevron: true, width: 46, height: 60)
+        size.glyphSize = 22
+        size.menuBuilder = { [weak self] in self?.sizeMenu() ?? NSMenu() }
+        size.setFrameOrigin(NSPoint(x: 8, y: 4))
+        _ = group("", 62, [size])
+    }
+
+    func buildColorGroup() {
         colors.frame = NSRect(x: 8, y: 4, width: ColorGroup.intrinsicWidth, height: 74)
         colors.onPick = { [weak self] color, secondary in self?.apply(color: color, secondary: secondary) }
         colors.onSelectWell = { [weak self] primary in
@@ -244,30 +388,94 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         }
         colors.editButton.onClick = { [weak self] in self?.editColor(nil) }
         _ = group("色彩", ColorGroup.intrinsicWidth + 16, [colors])
+    }
 
-        // Copilot 與圖層
+    func buildCopilotGroup() {
         let copilot = RibbonButton(.copilot, caption: "Copilot", kind: .tall, chevron: false, width: 54, height: 62)
         copilot.glyphSize = 24
         copilot.toolTip = "AI 工具"
         copilot.onClick = { [weak self] in self?.copilotAction(nil) }
         copilot.setFrameOrigin(NSPoint(x: 8, y: 8))
-        let copilotGroup = group("", 70, [copilot])
-        copilotGroup.showsSeparator = true
+        _ = group("", 70, [copilot])
+    }
 
+    func buildLayersGroup() {
         layersButton = RibbonButton(.layers, caption: "圖層", kind: .tall, chevron: false, width: 54, height: 62)
         layersButton.glyphSize = 24
+        layersButton.isChecked = !layerPanel.isHidden
         layersButton.onClick = { [weak self] in self?.toggleLayers(nil) }
         layersButton.setFrameOrigin(NSPoint(x: 8, y: 8))
-        let layerGroup = group("", 70, [layersButton])
-        layerGroup.showsSeparator = false
+        let container = group("", 70, [layersButton])
+        container.showsSeparator = false
+    }
+
+    func buildViewTab() {
+        func tall(_ glyph: Glyph, _ caption: String, _ action: @escaping () -> Void) -> RibbonButton {
+            let button = RibbonButton(glyph, caption: caption, kind: .tall, width: 60, height: 62)
+            button.glyphSize = 24
+            button.onClick = action
+            button.setFrameOrigin(NSPoint(x: 0, y: 8))
+            return button
+        }
+        let zoomIn = tall(.zoomIn, "放大") { [weak self] in self?.setZoom((self?.canvas.zoom ?? 1) * 1.25) }
+        let zoomOut = tall(.zoomOut, "縮小") { [weak self] in self?.setZoom((self?.canvas.zoom ?? 1) / 1.25) }
+        let actual = tall(.canvasSize, "100%") { [weak self] in self?.setZoom(1) }
+        zoomIn.setFrameOrigin(NSPoint(x: 8, y: 8))
+        zoomOut.setFrameOrigin(NSPoint(x: 70, y: 8))
+        actual.setFrameOrigin(NSPoint(x: 132, y: 8))
+        _ = group("縮放", 200, [zoomIn, zoomOut, actual])
+
+        let grid = tall(.grid, "格線") { [weak self] in self?.gridAction(nil) }
+        grid.isChecked = canvas.grid
+        grid.setFrameOrigin(NSPoint(x: 8, y: 8))
+        let layersToggle = tall(.layers, "圖層面板") { [weak self] in self?.toggleLayers(nil) }
+        layersToggle.isChecked = !layerPanel.isHidden
+        layersToggle.setFrameOrigin(NSPoint(x: 70, y: 8))
+        _ = group("顯示或隱藏", 140, [grid, layersToggle])
+
+        let fit = tall(.fitWindow, "符合視窗") { [weak self] in self?.fitCanvas(nil) }
+        fit.setFrameOrigin(NSPoint(x: 8, y: 8))
+        let full = tall(.marquee, "全螢幕") { [weak self] in self?.window?.toggleFullScreen(nil) }
+        full.setFrameOrigin(NSPoint(x: 70, y: 8))
+        let container = group("顯示", 140, [fit, full])
+        container.showsSeparator = false
     }
 
     func layoutRibbon() {
         var x: CGFloat = 6
         for container in groups {
+            container.setFrameSize(NSSize(width: container.frame.width, height: ribbon.bounds.height))
             container.setFrameOrigin(NSPoint(x: x, y: 0))
             x += container.frame.width
         }
+    }
+
+    // MARK: Windows XP chrome
+
+    func buildClassicMenu() {
+        classicMenu.entries = [
+            ClassicMenuBar.Entry(title: "檔案(F)") { [weak self] in self?.fileMenu() ?? NSMenu() },
+            ClassicMenuBar.Entry(title: "編輯(E)") { [weak self] in self?.editMenu() ?? NSMenu() },
+            ClassicMenuBar.Entry(title: "檢視(V)") { [weak self] in self?.viewMenu() ?? NSMenu() },
+            ClassicMenuBar.Entry(title: "影像(I)") { [weak self] in self?.imageMenu() ?? NSMenu() },
+            ClassicMenuBar.Entry(title: "色彩(C)") { [weak self] in self?.colorMenu() ?? NSMenu() },
+            ClassicMenuBar.Entry(title: "說明(H)") { [weak self] in self?.helpMenu() ?? NSMenu() }
+        ]
+        classicMenu.needsDisplay = true
+    }
+
+    func buildClassicExtras() {
+        toolbox.onSelect = { [weak self] tool in self?.selectTool(tool) }
+        toolbox.onWidth = { [weak self] width in
+            guard let self else { return }
+            self.canvas.lineWidth = width
+            self.dock.sizeSlider.value = Double(width)
+        }
+        workspace.addSubview(toolbox)
+        classicPalette.onPick = { [weak self] color, secondary in self?.apply(color: color, secondary: secondary) }
+        classicPalette.onEdit = { [weak self] in self?.editColor(nil) }
+        classicPalette.primary = canvas.primary
+        classicPalette.secondary = canvas.secondary
     }
 
     // MARK: Workspace
@@ -279,11 +487,11 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         scroll.drawsBackground = true
         scroll.backgroundColor = Fluent.workspace
         scroll.contentView.postsBoundsChangedNotifications = true
-        stage.addSubview(canvas)
+        if canvas.superview !== stage { stage.addSubview(canvas) }
         scroll.documentView = stage
         canvas.wantsLayer = true
         canvas.layer?.shadowColor = NSColor.black.cgColor
-        canvas.layer?.shadowOpacity = 0.18
+        canvas.layer?.shadowOpacity = Fluent.skin == .winxp ? 0 : 0.18
         canvas.layer?.shadowRadius = 4
         canvas.layer?.shadowOffset = CGSize(width: 0, height: -1)
         workspace.addSubview(scroll)
@@ -298,10 +506,9 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             self.canvas.opacity = CGFloat(value / 100)
             self.dock.opacityCard.toolTip = "不透明度：\(Int(value))%"
         }
-        workspace.addSubview(dock)
+        if Fluent.skin.layout == .fluent { workspace.addSubview(dock) }
 
         layerPanel.background = Fluent.chrome
-        layerPanel.isHidden = true
         layerScroll.drawsBackground = false
         layerScroll.hasVerticalScroller = true
         layerStack.background = nil
@@ -316,7 +523,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         let merge = iconButton(.merge, "向下合併", 28, 26) { [weak self] in self?.mergeLayer() }
         let remove = iconButton(.trash, "刪除圖層", 28, 26) { [weak self] in self?.deleteLayer() }
         for control in [add, up, down, copy, merge, remove] {
-            control.identifier = control.identifier ?? NSUserInterfaceItemIdentifier("layer-tool")
+            if control.identifier == nil { control.identifier = NSUserInterfaceItemIdentifier("layer-tool") }
             layerPanel.addSubview(control)
         }
         layerOpacity.onChange = { [weak self] value in self?.setLayerOpacity(value) }
@@ -337,26 +544,51 @@ final class PaintController: NSWindowController, NSWindowDelegate {
 
     func layoutChrome() {
         let size = root.bounds.size
-        menuRow.frame = NSRect(x: 0, y: 0, width: size.width, height: PaintController.menuHeight)
-        ribbon.frame = NSRect(x: 0, y: PaintController.menuHeight,
-                              width: size.width, height: PaintController.ribbonHeight)
-        let workTop = PaintController.menuHeight + PaintController.ribbonHeight
-        let workHeight = max(120, size.height - workTop - PaintController.statusHeight)
-        workspace.frame = NSRect(x: 0, y: workTop, width: size.width, height: workHeight)
-        statusBar.frame = NSRect(x: 0, y: workTop + workHeight,
-                                 width: size.width, height: PaintController.statusHeight)
-        layoutMenuRow()
-        layoutRibbon()
-
-        let panelWidth = layerPanel.isHidden ? 0 : PaintController.layerWidth
-        scroll.frame = NSRect(x: 0, y: 0, width: workspace.bounds.width - panelWidth,
-                              height: workspace.bounds.height)
-        layerPanel.frame = NSRect(x: workspace.bounds.width - panelWidth, y: 0,
-                                  width: panelWidth, height: workspace.bounds.height)
+        let tokens = Fluent.t
+        switch Fluent.skin.layout {
+        case .classic:
+            classicMenu.frame = NSRect(x: 0, y: 0, width: size.width, height: tokens.menuHeight)
+            let paletteHeight = ClassicPalette.preferredHeight
+            let workHeight = max(120, size.height - tokens.menuHeight - paletteHeight - tokens.statusHeight)
+            workspace.frame = NSRect(x: 0, y: tokens.menuHeight, width: size.width, height: workHeight)
+            classicPalette.frame = NSRect(x: 0, y: tokens.menuHeight + workHeight,
+                                          width: size.width, height: paletteHeight)
+            classicStatus.frame = NSRect(x: 0, y: size.height - tokens.statusHeight,
+                                         width: size.width, height: tokens.statusHeight)
+            toolbox.frame = NSRect(x: 0, y: 0, width: ToolboxView.preferredWidth, height: workHeight)
+            let panelWidth = layerPanel.isHidden ? 0 : PaintController.layerWidth
+            scroll.frame = NSRect(x: ToolboxView.preferredWidth, y: 0,
+                                  width: max(80, size.width - ToolboxView.preferredWidth - panelWidth),
+                                  height: workHeight)
+            layerPanel.frame = NSRect(x: size.width - panelWidth, y: 0, width: panelWidth, height: workHeight)
+        default:
+            let topHeight = tokens.menuHeight
+            if Fluent.skin.layout == .fluent {
+                menuRow.frame = NSRect(x: 0, y: 0, width: size.width, height: topHeight)
+                layoutMenuRow()
+            } else {
+                tabStrip.frame = NSRect(x: 0, y: 0, width: size.width, height: topHeight)
+                layoutTabStrip()
+            }
+            ribbon.frame = NSRect(x: 0, y: topHeight, width: size.width, height: tokens.ribbonHeight)
+            let workTop = topHeight + tokens.ribbonHeight
+            let workHeight = max(120, size.height - workTop - tokens.statusHeight)
+            workspace.frame = NSRect(x: 0, y: workTop, width: size.width, height: workHeight)
+            statusBar.frame = NSRect(x: 0, y: workTop + workHeight,
+                                     width: size.width, height: tokens.statusHeight)
+            layoutRibbon()
+            let panelWidth = layerPanel.isHidden ? 0 : PaintController.layerWidth
+            scroll.frame = NSRect(x: 0, y: 0, width: max(80, size.width - panelWidth), height: workHeight)
+            layerPanel.frame = NSRect(x: size.width - panelWidth, y: 0, width: panelWidth, height: workHeight)
+            if Fluent.skin.layout == .fluent {
+                let dockHeight = min(260, max(150, workHeight - 80))
+                dock.frame = NSRect(x: 14, y: (workHeight - dockHeight) / 2,
+                                    width: SliderDock.preferredWidth, height: dockHeight)
+                dock.isHidden = !canvas.tool.usesSize
+            }
+        }
+        scroll.backgroundColor = Fluent.workspace
         layoutLayerPanel()
-        let dockHeight = min(260, max(150, workspace.bounds.height - 80))
-        dock.frame = NSRect(x: 14, y: (workspace.bounds.height - dockHeight) / 2,
-                            width: SliderDock.preferredWidth, height: dockHeight)
         layoutStage()
     }
 
@@ -369,7 +601,6 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             guard let button = subview as? RibbonButton else { continue }
             tools.append(button)
         }
-        // Bottom row of layer commands, then the opacity slider above it.
         let commands = tools.filter { $0.identifier?.rawValue != "layer-add" }
         var x: CGFloat = 12
         for button in commands {
@@ -377,25 +608,27 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             x += 32
         }
         bottom -= 34
-        layerOpacity.frame = NSRect(x: 12, y: bottom - 22, width: width - 24, height: 20)
+        layerOpacity.frame = NSRect(x: 12, y: bottom - 22, width: max(40, width - 24), height: 20)
         bottom -= 30
         if let add = tools.first(where: { $0.identifier?.rawValue == "layer-add" }) {
-            add.setFrameOrigin(NSPoint(x: width - 40, y: 10))
+            add.setFrameOrigin(NSPoint(x: max(8, width - 40), y: 10))
         }
-        layerScroll.frame = NSRect(x: 8, y: 44, width: width - 16, height: max(60, bottom - 52))
-        layerStack.setFrameSize(NSSize(width: layerScroll.contentSize.width,
-                                       height: max(layerScroll.contentSize.height,
-                                                   CGFloat(doc.layers.count) * 128 + 8)))
+        layerScroll.frame = NSRect(x: 8, y: 44, width: max(40, width - 16), height: max(60, bottom - 52))
         layoutLayerRows()
     }
 
     func layoutStage() {
         let viewport = scroll.contentSize
-        let size = NSSize(width: max(viewport.width, canvas.frame.width + 72),
-                          height: max(viewport.height, canvas.frame.height + 72))
+        let margin: CGFloat = Fluent.skin == .winxp ? 6 : 36
+        let size = NSSize(width: max(viewport.width, canvas.frame.width + margin * 2),
+                          height: max(viewport.height, canvas.frame.height + margin * 2))
         if stage.frame.size != size { stage.setFrameSize(size) }
-        canvas.setFrameOrigin(NSPoint(x: max(36, ((size.width - canvas.frame.width) / 2).rounded()),
-                                      y: max(36, ((size.height - canvas.frame.height) / 2).rounded())))
+        if Fluent.skin == .winxp {
+            canvas.setFrameOrigin(NSPoint(x: margin, y: margin))
+        } else {
+            canvas.setFrameOrigin(NSPoint(x: max(margin, ((size.width - canvas.frame.width) / 2).rounded()),
+                                          y: max(margin, ((size.height - canvas.frame.height) / 2).rounded())))
+        }
     }
 
     func windowDidResize(_ notification: Notification) { root.needsLayout = true }
@@ -414,6 +647,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         statusBar.zoomPopup.needsDisplay = true
         undoButton?.isEnabledControl = !doc.undoStack.isEmpty
         redoButton?.isEnabledControl = !doc.redoStack.isEmpty
+        classicStatus.canvasText = "\(doc.width) × \(doc.height)"
+        classicStatus.needsDisplay = true
         canvas.refresh()
         layoutStage()
         rebuildLayers()
@@ -423,17 +658,20 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         canvas.tool = tool
         if PaintTool.brushes.contains(tool) {
             activeBrush = tool
-            brushButton.glyph = tool.glyph
-            brushButton.needsDisplay = true
+            brushButton?.glyph = tool.glyph
+            brushButton?.needsDisplay = true
         }
         for (candidate, button) in toolButtons { button.isChecked = candidate == tool }
-        brushButton.isChecked = PaintTool.brushes.contains(tool)
+        brushButton?.isChecked = PaintTool.brushes.contains(tool)
         gallery.select(tool)
+        toolbox.select(tool)
         dock.isHidden = !tool.usesSize
-        outlineButton.isEnabledControl = tool.isShape
-        fillButton.isEnabledControl = tool.isShape
+        outlineButton?.isEnabledControl = tool.isShape
+        fillButton?.isEnabledControl = tool.isShape
         statusBar.cursorText = tool.rawValue
         statusBar.needsDisplay = true
+        classicStatus.hint = tool.rawValue
+        classicStatus.needsDisplay = true
         window?.makeFirstResponder(canvas)
     }
 
@@ -448,6 +686,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         }
         colors.remember(color)
         colors.needsDisplay = true
+        classicPalette.primary = canvas.primary
+        classicPalette.secondary = canvas.secondary
     }
 
     // MARK: Menus in the ribbon
@@ -495,6 +735,10 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         menu.addItem(.separator())
         item(menu, "格線", { [weak self] in self?.gridAction(nil) }, checked: canvas.grid)
         item(menu, "圖層面板", { [weak self] in self?.toggleLayers(nil) }, checked: !layerPanel.isHidden)
+        menu.addItem(.separator())
+        let appearance = NSMenuItem(title: "外觀", action: nil, keyEquivalent: "")
+        appearance.submenu = skinMenu()
+        menu.addItem(appearance)
         menu.addItem(.separator())
         item(menu, "全螢幕") { [weak self] in self?.window?.toggleFullScreen(nil) }
         return menu
@@ -546,6 +790,57 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         item(menu, "無填滿", { [weak self] in self?.setShapeStyle(0) }, checked: canvas.shapeFill == 0)
         item(menu, "實心色彩", { [weak self] in self?.setShapeStyle(2) }, checked: canvas.shapeFill == 2)
         item(menu, "僅填滿", { [weak self] in self?.setShapeStyle(1) }, checked: canvas.shapeFill == 1)
+        return menu
+    }
+
+    func rotateFlipMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "向右旋轉 90°") { [weak self] in self?.transform("rotate") }
+        item(menu, "向左旋轉 90°") { [weak self] in
+            self?.transform("rotate"); self?.transform("rotate"); self?.transform("rotate")
+        }
+        item(menu, "旋轉 180°") { [weak self] in self?.transform("rotate"); self?.transform("rotate") }
+        menu.addItem(.separator())
+        item(menu, "水平翻轉") { [weak self] in self?.transform("horizontal") }
+        item(menu, "垂直翻轉") { [weak self] in self?.transform("vertical") }
+        return menu
+    }
+
+    func sizeMenu() -> NSMenu {
+        let menu = NSMenu()
+        for width in [1, 3, 5, 8, 12, 20, 32] {
+            item(menu, "\(width) 像素", { [weak self] in
+                self?.canvas.lineWidth = CGFloat(width)
+                self?.dock.sizeSlider.value = Double(width)
+                self?.toolbox.activeWidth = CGFloat(width)
+            }, checked: Int(canvas.lineWidth) == width)
+        }
+        return menu
+    }
+
+    func imageMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "翻轉/旋轉…") { [weak self] in self?.transform("rotate") }
+        item(menu, "水平翻轉") { [weak self] in self?.transform("horizontal") }
+        item(menu, "垂直翻轉") { [weak self] in self?.transform("vertical") }
+        menu.addItem(.separator())
+        item(menu, "屬性…") { [weak self] in self?.resizeAction(nil) }
+        item(menu, "裁剪") { [weak self] in self?.cropAction(nil) }
+        item(menu, "清除影像") { [weak self] in self?.clearAction(nil) }
+        menu.addItem(.separator())
+        item(menu, "移除背景") { [weak self] in self?.removeBackground(nil) }
+        return menu
+    }
+
+    func colorMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "編輯色彩…") { [weak self] in self?.editColor(nil) }
+        return menu
+    }
+
+    func helpMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "關於小畫家") { NSApp.orderFrontStandardAboutPanel(nil) }
         return menu
     }
 
@@ -685,7 +980,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     }
     @objc func toggleLayers(_ sender: Any?) {
         layerPanel.isHidden.toggle()
-        layersButton.isChecked = !layerPanel.isHidden
+        layersButton?.isChecked = !layerPanel.isHidden
         root.needsLayout = true
         layoutChrome()
         rebuildLayers()
@@ -714,6 +1009,21 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         statusBar.gridButton.isChecked = canvas.grid
         canvas.needsDisplay = true
     }
+
+    // MARK: Skins
+
+    func skinMenu() -> NSMenu {
+        let menu = NSMenu()
+        for candidate in Skin.allCases {
+            item(menu, candidate.title, { [weak self] in self?.applySkin(candidate) },
+                 checked: candidate == Fluent.skin)
+        }
+        return menu
+    }
+    @objc func chooseWin11(_ sender: Any?) { applySkin(.win11) }
+    @objc func chooseWin10(_ sender: Any?) { applySkin(.win10) }
+    @objc func chooseWin7(_ sender: Any?) { applySkin(.win7) }
+    @objc func chooseWinXP(_ sender: Any?) { applySkin(.winxp) }
 
     // MARK: Colour
 
@@ -752,7 +1062,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         canvas.doc = doc
         canvas.selection = nil
         update()
-        fitCanvas(nil)
+        setZoom(1)
     }
     @objc func openDocument(_ sender: Any?) {
         let panel = NSOpenPanel()
@@ -773,7 +1083,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             canvas.doc = next
             canvas.selection = nil
             update()
-            fitCanvas(nil)
+            setZoom(1)
         } catch { showError(error) }
     }
     @objc func saveAction(_ sender: Any?) { _ = save() }
@@ -854,10 +1164,17 @@ final class PaintController: NSWindowController, NSWindowDelegate {
 
     @objc func settingsAction(_ sender: Any?) {
         let alert = NSAlert()
-        alert.messageText = "小畫家設定"
-        alert.informativeText = "此版本使用系統的淺色外觀，並以本機運算處理所有影像。"
-        alert.addButton(withTitle: "好")
-        alert.runModal()
+        alert.messageText = "外觀"
+        alert.informativeText = "選擇要模擬的 Windows 小畫家版本。設定會記住，下次開啟沿用。"
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 26))
+        popup.addItems(withTitles: Skin.allCases.map { $0.title })
+        popup.selectItem(at: Skin.allCases.firstIndex(of: Fluent.skin) ?? 0)
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "套用")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let index = popup.indexOfSelectedItem
+        if index >= 0 && index < Skin.allCases.count { applySkin(Skin.allCases[index]) }
     }
 
     @objc func copilotAction(_ sender: Any?) {
@@ -942,7 +1259,6 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         for index in doc.layers.indices { doc.layers[index].raster = doc.layers[index].raster.cropped(rect) }
         canvas.selection = nil
         update()
-        fitCanvas(nil)
     }
 
     @objc func resizeAction(_ sender: Any?) {
@@ -984,7 +1300,6 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         }
         canvas.selection = nil
         update()
-        fitCanvas(nil)
     }
 
     func transform(_ kind: String) {
@@ -993,7 +1308,6 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         for index in doc.layers.indices { doc.layers[index].raster = doc.layers[index].raster.transformed(kind) }
         canvas.selection = nil
         update()
-        fitCanvas(nil)
     }
     @objc func rotateAction(_ sender: Any?) { transform("rotate") }
     @objc func flipAction(_ sender: Any?) { transform("horizontal") }
@@ -1105,6 +1419,19 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         entry(view, "實際大小", #selector(actualSize), "0")
         entry(view, "符合視窗", #selector(fitCanvas), "1")
         entry(view, "格線", #selector(gridAction), "g")
+        view.addItem(.separator())
+        let appearance = NSMenuItem(title: "外觀", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "外觀")
+        let selectors: [Selector] = [#selector(chooseWin11), #selector(chooseWin10),
+                                     #selector(chooseWin7), #selector(chooseWinXP)]
+        for (index, candidate) in Skin.allCases.enumerated() {
+            let entryItem = NSMenuItem(title: candidate.title, action: selectors[index], keyEquivalent: "")
+            entryItem.target = self
+            entryItem.state = candidate == Fluent.skin ? .on : .off
+            appearanceMenu.addItem(entryItem)
+        }
+        appearance.submenu = appearanceMenu
+        view.addItem(appearance)
     }
 }
 
@@ -1175,7 +1502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if controller == nil { controller = PaintController() }
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        controller.fitCanvas(nil)
+        controller.setZoom(1)
         controller.window?.makeFirstResponder(controller.canvas)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

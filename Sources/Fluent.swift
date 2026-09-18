@@ -3,7 +3,141 @@ import AppKit
 // Fluent design tokens and primitive controls used to reproduce the
 // Windows 11 Paint chrome with native AppKit drawing.
 
+enum SkinLayout { case fluent, ribbon, classic }
+
+enum Skin: String, CaseIterable {
+    case win11, win10, win7, winxp
+
+    var title: String {
+        switch self {
+        case .win11: return "Windows 11"
+        case .win10: return "Windows 10"
+        case .win7: return "Windows 7"
+        case .winxp: return "Windows XP"
+        }
+    }
+    var layout: SkinLayout {
+        switch self {
+        case .win11: return .fluent
+        case .win10, .win7: return .ribbon
+        case .winxp: return .classic
+        }
+    }
+    var appName: String { self == .winxp ? "小畫家" : "小畫家" }
+    var tokens: SkinTokens {
+        func c(_ hex: UInt32, _ a: CGFloat = 1) -> NSColor { Fluent.color(hex, a) }
+        switch self {
+        case .win11:
+            return SkinTokens(
+                chrome: c(0xFFFFFF), chromeBorder: c(0xE5E5E5),
+                workspaceTop: c(0xEFEFF3), workspaceBottom: c(0xEFEFF3),
+                statusFill: c(0xF3F3F3), divider: c(0xE4E4E4),
+                ink: c(0x1B1B1B), inkSoft: c(0x5D5D5D), caption: c(0x5D5D5D),
+                accent: c(0x0067C0), accentDeep: c(0x003E92), accentSoft: c(0xCCE4F7),
+                checkedFill: c(0xEFF6FC), checkedBorder: c(0xA3CDEC),
+                hoverFill: c(0x000000, 0.0373), pressFill: c(0x000000, 0.0745),
+                fieldFill: c(0xFBFBFB), fieldBorder: c(0xE2E2E2), trackFill: c(0xD8D8D8),
+                shadow: c(0x000000, 0.13),
+                tabBar: c(0xFFFFFF), tabActive: c(0xFFFFFF), tabInactiveInk: c(0x1B1B1B),
+                fileTab: c(0x0067C0),
+                radius: 5, roundSwatches: true, bevel: false,
+                faces: ["Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei"],
+                boldFaces: ["Segoe UI Semibold", "Microsoft JhengHei UI Bold"],
+                menuHeight: 40, ribbonHeight: 104, statusHeight: 28)
+        case .win10:
+            return SkinTokens(
+                chrome: c(0xF5F6F8), chromeBorder: c(0xD5D9DE),
+                workspaceTop: c(0xC6CFE0), workspaceBottom: c(0xD8E1F0),
+                statusFill: c(0xF0F0F0), divider: c(0xD9DDE3),
+                ink: c(0x1B1B1B), inkSoft: c(0x5A5A5A), caption: c(0x6E6E6E),
+                accent: c(0x0072C6), accentDeep: c(0x005A9E), accentSoft: c(0xCDE6F7),
+                checkedFill: c(0xCDE6F7), checkedBorder: c(0x66A9D8),
+                hoverFill: c(0x2E8ADA, 0.16), pressFill: c(0x2E8ADA, 0.3),
+                fieldFill: c(0xFFFFFF), fieldBorder: c(0xC8CDD4), trackFill: c(0xCBCBCB),
+                shadow: c(0x000000, 0.12),
+                tabBar: c(0xFFFFFF), tabActive: c(0xF5F6F8), tabInactiveInk: c(0x1B1B1B),
+                fileTab: c(0x0072C6),
+                radius: 0, roundSwatches: false, bevel: false,
+                faces: ["Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei"],
+                boldFaces: ["Segoe UI Semibold", "Microsoft JhengHei UI Bold"],
+                menuHeight: 30, ribbonHeight: 100, statusHeight: 26)
+        case .win7:
+            return SkinTokens(
+                chrome: c(0xE8F0FA), chromeBorder: c(0x9DB9D1),
+                workspaceTop: c(0xA8B9CE), workspaceBottom: c(0xC9D5E5),
+                statusFill: c(0xDDE9F6), divider: c(0xB6CBE0),
+                ink: c(0x11314F), inkSoft: c(0x35526E), caption: c(0x3B5A79),
+                accent: c(0x3C7FB1), accentDeep: c(0x1F4E73), accentSoft: c(0xCBE2F6),
+                checkedFill: c(0xC5DEF5), checkedBorder: c(0x6AA4D4),
+                hoverFill: c(0xFFE09A, 0.75), pressFill: c(0xF7C55E, 0.85),
+                fieldFill: c(0xFDFEFF), fieldBorder: c(0xA6C0DA), trackFill: c(0xBACBDD),
+                shadow: c(0x11314F, 0.18),
+                tabBar: c(0xCFE0F1), tabActive: c(0xE8F0FA), tabInactiveInk: c(0x11314F),
+                fileTab: c(0x3C7FB1),
+                radius: 3, roundSwatches: false, bevel: false,
+                faces: ["Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei"],
+                boldFaces: ["Segoe UI Semibold", "Microsoft JhengHei UI Bold"],
+                menuHeight: 30, ribbonHeight: 100, statusHeight: 26)
+        case .winxp:
+            return SkinTokens(
+                chrome: c(0xECE9D8), chromeBorder: c(0xACA899),
+                workspaceTop: c(0x808080), workspaceBottom: c(0x808080),
+                statusFill: c(0xECE9D8), divider: c(0xACA899),
+                ink: c(0x000000), inkSoft: c(0x3C3C3C), caption: c(0x000000),
+                accent: c(0x316AC5), accentDeep: c(0x0A246A), accentSoft: c(0xB6C7E6),
+                checkedFill: c(0xDCD8C8), checkedBorder: c(0x808080),
+                hoverFill: c(0x000000, 0.05), pressFill: c(0x000000, 0.12),
+                fieldFill: c(0xFFFFFF), fieldBorder: c(0x808080), trackFill: c(0xACA899),
+                shadow: c(0x000000, 0.0),
+                tabBar: c(0xECE9D8), tabActive: c(0xECE9D8), tabInactiveInk: c(0x000000),
+                fileTab: c(0x0A246A),
+                radius: 0, roundSwatches: false, bevel: true,
+                faces: ["Tahoma", "Microsoft JhengHei", "PingFang TC"],
+                boldFaces: ["Tahoma Bold", "Microsoft JhengHei Bold"],
+                menuHeight: 22, ribbonHeight: 0, statusHeight: 22)
+        }
+    }
+}
+
+struct SkinTokens {
+    var chrome: NSColor
+    var chromeBorder: NSColor
+    var workspaceTop: NSColor
+    var workspaceBottom: NSColor
+    var statusFill: NSColor
+    var divider: NSColor
+    var ink: NSColor
+    var inkSoft: NSColor
+    var caption: NSColor
+    var accent: NSColor
+    var accentDeep: NSColor
+    var accentSoft: NSColor
+    var checkedFill: NSColor
+    var checkedBorder: NSColor
+    var hoverFill: NSColor
+    var pressFill: NSColor
+    var fieldFill: NSColor
+    var fieldBorder: NSColor
+    var trackFill: NSColor
+    var shadow: NSColor
+    var tabBar: NSColor
+    var tabActive: NSColor
+    var tabInactiveInk: NSColor
+    var fileTab: NSColor
+    var radius: CGFloat
+    var roundSwatches: Bool
+    var bevel: Bool
+    var faces: [String]
+    var boldFaces: [String]
+    var menuHeight: CGFloat
+    var ribbonHeight: CGFloat
+    var statusHeight: CGFloat
+}
+
 enum Fluent {
+    static var skin: Skin = .win11
+    static var t: SkinTokens { skin.tokens }
+
     static func color(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
         NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
                 green: CGFloat((hex >> 8) & 0xFF) / 255,
@@ -11,30 +145,34 @@ enum Fluent {
                 alpha: alpha)
     }
 
-    static let chrome        = color(0xFFFFFF)
-    static let chromeBorder  = color(0xE5E5E5)
-    static let workspace     = color(0xEFEFF3)
-    static let statusFill    = color(0xF3F3F3)
-    static let divider       = color(0xE4E4E4)
-    static let ink           = color(0x1B1B1B)
-    static let inkSoft       = color(0x5D5D5D)
-    static let accent        = color(0x0067C0)
-    static let accentDeep    = color(0x003E92)
-    static let accentSoft    = color(0xCCE4F7)
-    static let checkedFill   = color(0xEFF6FC)
-    static let checkedBorder = color(0xA3CDEC)
-    static let hoverFill     = color(0x000000, 0.0373)
-    static let pressFill     = color(0x000000, 0.0745)
-    static let fieldFill     = color(0xFBFBFB)
-    static let fieldBorder   = color(0xE2E2E2)
-    static let trackFill     = color(0xD8D8D8)
-    static let shadow        = color(0x000000, 0.13)
+    static var chrome: NSColor { t.chrome }
+    static var chromeBorder: NSColor { t.chromeBorder }
+    static var workspace: NSColor { t.workspaceTop }
+    static var statusFill: NSColor { t.statusFill }
+    static var divider: NSColor { t.divider }
+    static var ink: NSColor { t.ink }
+    static var inkSoft: NSColor { t.inkSoft }
+    static var caption: NSColor { t.caption }
+    static var accent: NSColor { t.accent }
+    static var accentDeep: NSColor { t.accentDeep }
+    static var accentSoft: NSColor { t.accentSoft }
+    static var checkedFill: NSColor { t.checkedFill }
+    static var checkedBorder: NSColor { t.checkedBorder }
+    static var hoverFill: NSColor { t.hoverFill }
+    static var pressFill: NSColor { t.pressFill }
+    static var fieldFill: NSColor { t.fieldFill }
+    static var fieldBorder: NSColor { t.fieldBorder }
+    static var trackFill: NSColor { t.trackFill }
+    static var shadow: NSColor { t.shadow }
+    static var radius: CGFloat { t.radius }
+    static var roundSwatches: Bool { t.roundSwatches }
+    static var classicChrome: Bool { t.bevel }
 
     static func ui(_ size: CGFloat, bold: Bool = false) -> NSFont {
-        let faces = bold
-            ? ["Segoe UI Semibold", "Microsoft JhengHei UI Bold", "Microsoft JhengHei Bold"]
-            : ["Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei"]
-        for name in faces { if let font = NSFont(name: name, size: size) { return font } }
+        let tokens = t
+        for name in (bold ? tokens.boldFaces : tokens.faces) {
+            if let font = NSFont(name: name, size: size) { return font }
+        }
         return NSFont.systemFont(ofSize: size, weight: bold ? .semibold : .regular)
     }
 
@@ -64,15 +202,42 @@ enum Fluent {
 
     static func fill(_ rect: NSRect, radius: CGFloat, color: NSColor) {
         color.setFill()
+        if radius <= 0 { rect.fill(); return }
         NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
     }
 
     static func stroke(_ rect: NSRect, radius: CGFloat, color: NSColor, width: CGFloat = 1) {
         color.setStroke()
-        let path = NSBezierPath(roundedRect: rect.insetBy(dx: width / 2, dy: width / 2),
-                                xRadius: radius, yRadius: radius)
+        let inset = rect.insetBy(dx: width / 2, dy: width / 2)
+        let path = radius <= 0 ? NSBezierPath(rect: inset)
+            : NSBezierPath(roundedRect: inset, xRadius: radius, yRadius: radius)
         path.lineWidth = width
         path.stroke()
+    }
+
+    static func gradient(_ rect: NSRect, _ top: NSColor, _ bottom: NSColor) {
+        if top == bottom { top.setFill(); rect.fill(); return }
+        NSGradient(starting: top, ending: bottom)?.draw(in: rect, angle: -90)
+    }
+
+    // Classic Windows 3D border. Raised for buttons, sunken for wells and panes.
+    static func bevel(_ rect: NSRect, raised: Bool, thin: Bool = false) {
+        let light = color(0xFFFFFF), face = color(0xECE9D8)
+        let shadow = color(0xACA899), dark = color(0x716F64)
+        let outerTop = raised ? light : shadow
+        let outerBottom = raised ? dark : light
+        let innerTop = raised ? face : dark
+        let innerBottom = raised ? shadow : face
+        func edge(_ r: NSRect, _ top: NSColor, _ bottom: NSColor) {
+            top.setFill()
+            NSRect(x: r.minX, y: r.minY, width: r.width, height: 1).fill()
+            NSRect(x: r.minX, y: r.minY, width: 1, height: r.height).fill()
+            bottom.setFill()
+            NSRect(x: r.minX, y: r.maxY - 1, width: r.width, height: 1).fill()
+            NSRect(x: r.maxX - 1, y: r.minY, width: 1, height: r.height).fill()
+        }
+        edge(rect, outerTop, outerBottom)
+        if !thin { edge(rect.insetBy(dx: 1, dy: 1), innerTop, innerBottom) }
     }
 }
 
@@ -80,10 +245,10 @@ enum Fluent {
 
 enum Glyph {
     case save, share, undo, redo, settings, chevron
-    case selectRect, crop, resize, rotate, flip, removeBackground
+    case selectRect, freeSelect, crop, resize, rotate, flip, removeBackground
     case pencil, bucket, letterA, eraser, dropper, magnifier
     case brush, marker, spray, pen
-    case line, curve, oval, rectangle, roundRectangle
+    case line, curve, oval, rectangle, roundRectangle, polygonShape
     case triangle, rightTriangle, diamond, pentagon, hexagon
     case arrowRight, arrowLeft, arrowUp, arrowDown
     case star4, star5, star6
@@ -203,6 +368,10 @@ struct GlyphPainter {
             line([p(4.2, 6.4), p(8, 10), p(11.8, 6.4)], width: 1.25)
         case .selectRect:
             frame(rect(2.2, 2.2, 11.6, 11.6), dash: true)
+        case .freeSelect:
+            line([p(8, 1.8), p(10.2, 6.2), p(14.6, 6.6), p(11.2, 9.8),
+                  p(12.4, 14.2), p(8, 12), p(3.6, 14.2), p(4.8, 9.8),
+                  p(1.4, 6.6), p(5.8, 6.2)], close: true, dash: true)
         case .crop:
             line([p(4.6, 1.6), p(4.6, 11.4), p(14.4, 11.4)])
             line([p(1.6, 4.6), p(11.4, 4.6), p(11.4, 14.4)])
@@ -280,6 +449,8 @@ struct GlyphPainter {
             frame(rect(2.2, 3.6, 11.6, 8.8))
         case .roundRectangle:
             frame(rect(2.2, 3.6, 11.6, 8.8), radius: 2.4)
+        case .polygonShape:
+            line([p(2.2, 9.6), p(6.4, 2.4), p(10.2, 6.6), p(13.8, 4.4), p(12.4, 13.6), p(4.2, 13.6)], close: true)
         case .triangle:
             line([p(8, 2.6), p(14, 13.4), p(2, 13.4)], close: true)
         case .rightTriangle:
@@ -469,20 +640,30 @@ class FluentControl: NSView {
         }
         onClick?()
     }
-    func backdrop(_ rect: NSRect, radius: CGFloat = 5) {
+    func backdrop(_ rect: NSRect, radius: CGFloat = -1) {
+        let r = radius < 0 ? Fluent.radius : radius
+        if Fluent.classicChrome {
+            if isChecked || pressing {
+                Fluent.color(0xDCD8C8).setFill(); rect.fill()
+                Fluent.bevel(rect, raised: false)
+            } else if hovering {
+                Fluent.bevel(rect, raised: true)
+            }
+            return
+        }
         if isChecked {
-            Fluent.fill(rect, radius: radius, color: Fluent.checkedFill)
-            Fluent.stroke(rect, radius: radius, color: Fluent.checkedBorder)
+            Fluent.fill(rect, radius: r, color: Fluent.checkedFill)
+            Fluent.stroke(rect, radius: r, color: Fluent.checkedBorder)
         } else if pressing {
-            Fluent.fill(rect, radius: radius, color: Fluent.pressFill)
+            Fluent.fill(rect, radius: r, color: Fluent.pressFill)
         } else if hovering {
-            Fluent.fill(rect, radius: radius, color: Fluent.hoverFill)
+            Fluent.fill(rect, radius: r, color: Fluent.hoverFill)
         }
     }
 }
 
 final class RibbonButton: FluentControl {
-    enum Kind { case grid, wide, tall, text }
+    enum Kind { case grid, wide, tall, text, labelled }
     var kind: Kind = .grid
     var glyph: Glyph?
     var caption: String = ""
@@ -503,12 +684,13 @@ final class RibbonButton: FluentControl {
         case .wide: defaultSize = NSSize(width: 44, height: 44)
         case .tall: defaultSize = NSSize(width: 54, height: 60)
         case .text: defaultSize = NSSize(width: max(52, Fluent.width(caption, font: Fluent.ui(13)) + 22), height: 30)
+        case .labelled: defaultSize = NSSize(width: Fluent.width(caption, font: Fluent.ui(12)) + 40, height: 24)
         }
         setFrameSize(NSSize(width: width ?? defaultSize.width, height: height ?? defaultSize.height))
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        backdrop(bounds, radius: kind == .tall ? 6 : 5)
+        backdrop(bounds, radius: kind == .tall ? Fluent.radius + 1 : Fluent.radius)
         let tint = isEnabledControl ? Fluent.ink : Fluent.color(0x9B9B9B)
         let accent = isEnabledControl ? accentTint : Fluent.color(0xB4B4B4)
         switch kind {
@@ -543,6 +725,16 @@ final class RibbonButton: FluentControl {
             Fluent.text(caption, in: NSRect(x: 0, y: captionTop, width: bounds.width,
                                             height: bounds.maxY - captionTop),
                         font: Fluent.ui(11), color: tint)
+        case .labelled:
+            let box = NSRect(x: 5, y: (bounds.height - 16) / 2, width: 16, height: 16)
+            if let glyph { GlyphPainter.draw(glyph, in: box, tint: tint, accent: accent) }
+            let right: CGFloat = showsChevron ? 14 : 4
+            Fluent.text(caption, in: NSRect(x: 25, y: 0, width: bounds.width - 25 - right, height: bounds.height),
+                        font: Fluent.ui(12), color: tint, alignment: .left)
+            if showsChevron {
+                GlyphPainter.draw(.chevron, in: NSRect(x: bounds.maxX - 14, y: (bounds.height - 9) / 2,
+                                                       width: 9, height: 9), tint: tint, accent: accent)
+            }
         }
     }
 }
@@ -561,6 +753,33 @@ final class ColorDot: FluentControl {
         self.isEmptySlot = empty
     }
     override func draw(_ dirtyRect: NSRect) {
+        if Fluent.classicChrome {
+            let well = bounds.insetBy(dx: 1, dy: 1)
+            if !isEmptySlot { color.setFill(); well.insetBy(dx: 2, dy: 2).fill() }
+            Fluent.bevel(well, raised: false, thin: true)
+            if isChecked {
+                Fluent.color(0x000000).setStroke()
+                let ring = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+                ring.lineWidth = 1
+                ring.stroke()
+            }
+            return
+        }
+        if !Fluent.roundSwatches {
+            let square = bounds.insetBy(dx: 2, dy: 2)
+            if !isEmptySlot { color.setFill(); square.fill() }
+            (isChecked ? Fluent.accent : Fluent.color(0x000000, 0.35)).setStroke()
+            let border = NSBezierPath(rect: square.insetBy(dx: 0.5, dy: 0.5))
+            border.lineWidth = isChecked ? 1.6 : 1
+            border.stroke()
+            if hovering && !isChecked {
+                Fluent.accent.setStroke()
+                let ring = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
+                ring.lineWidth = 1
+                ring.stroke()
+            }
+            return
+        }
         let inset: CGFloat = isChecked ? 3 : 1.5
         let circle = bounds.insetBy(dx: inset, dy: inset)
         if isChecked {
@@ -693,7 +912,7 @@ final class RibbonGroup: NSView {
     override func draw(_ dirtyRect: NSRect) {
         if !caption.isEmpty {
             Fluent.text(caption, in: NSRect(x: 0, y: bounds.maxY - 19, width: bounds.width, height: 16),
-                        font: Fluent.ui(11.5), color: Fluent.inkSoft)
+                        font: Fluent.ui(11.5), color: Fluent.caption)
         }
         if showsSeparator {
             Fluent.divider.setFill()

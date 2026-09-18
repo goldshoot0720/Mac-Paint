@@ -17,6 +17,7 @@ enum PaintTool: String, CaseIterable {
     case ellipse = "橢圓形"
     case rectangle = "矩形"
     case rounded = "圓角矩形"
+    case polygon = "多邊形"
     case triangle = "三角形"
     case rightTriangle = "直角三角形"
     case diamond = "菱形"
@@ -53,6 +54,7 @@ enum PaintTool: String, CaseIterable {
         case .ellipse: return .oval
         case .rectangle: return .rectangle
         case .rounded: return .roundRectangle
+        case .polygon: return .polygonShape
         case .triangle: return .triangle
         case .rightTriangle: return .rightTriangle
         case .diamond: return .diamond
@@ -74,7 +76,7 @@ enum PaintTool: String, CaseIterable {
     }
     static let brushes: [PaintTool] = [.brush, .calligraphy, .marker, .spray]
     static let shapes: [PaintTool] = [.line, .curve, .ellipse, .rectangle, .rounded,
-                                      .triangle, .rightTriangle, .diamond, .pentagon, .hexagon,
+                                      .polygon, .triangle, .rightTriangle, .diamond, .pentagon, .hexagon,
                                       .arrow, .arrowLeft, .arrowUp, .arrowDown,
                                       .star4, .star, .star6,
                                       .calloutRect, .calloutOval, .calloutCloud, .heart, .lightning]
@@ -104,6 +106,7 @@ final class CanvasView: NSView {
     var curveStage = 0
     var curveStart = CGPoint.zero, curveEnd = CGPoint.zero
     var curveControl1 = CGPoint.zero, curveControl2 = CGPoint.zero
+    var polygonPoints: [CGPoint] = []
     var zoomRequest: ((Bool) -> Void)?
     var fontName = "Helvetica" { didSet { updateTextStyle() } }
     var fontSize: CGFloat = 28 { didSet { updateTextStyle() } }
@@ -193,6 +196,16 @@ final class CanvasView: NSView {
         }
         if tool == .magnifier { zoomRequest?(color == primary); return }
         if tool == .text { textAnchor = start; pendingTextRect = nil; drawing = true; status?("拖出文字框，放開後直接輸入；Esc 取消"); return }
+        if tool == .polygon {
+            if polygonPoints.isEmpty {
+                gestureSnapshot = doc.snapshot; gestureUndo = doc.undoStack; gestureRedo = doc.redoStack
+                selection = nil; doc.checkpoint(); base = doc.layers[doc.active].raster
+                polygonPoints = [start]
+            }
+            drawing = true
+            status?("多邊形 · 依序點選頂點，雙擊或回到起點封閉圖形")
+            return
+        }
         if tool == .curve {
             if curveStage == 0 {
                 gestureSnapshot = doc.snapshot; gestureUndo = doc.undoStack; gestureRedo = doc.redoStack
@@ -224,6 +237,13 @@ final class CanvasView: NSView {
         guard drawing else { return }
         var p = point(event)
         if tool == .text { pendingTextRect = rect(start,p); needsDisplay = true; return }
+        if tool == .polygon {
+            if let base { doc.layers[doc.active].raster = base }
+            drawPolygon(preview:p,closed:false)
+            last = p; refresh()
+            status?("\(Int(p.x)), \(Int(p.y)) 像素")
+            return
+        }
         if tool == .curve {
             if let base { doc.layers[doc.active].raster = base }
             if curveStage <= 1 {
@@ -247,13 +267,30 @@ final class CanvasView: NSView {
             shape(from:start,to:p)
         }
         last = p; refresh()
-        status?("\(Int(p.x)), \(Int(p.y)) px" + (selection.map { "   ·   選取 \(Int($0.width)) × \(Int($0.height))" } ?? ""))
+        status?("\(Int(p.x)), \(Int(p.y)) 像素")
     }
     override func mouseUp(with event:NSEvent) { end(event) }
     override func rightMouseUp(with event:NSEvent) { end(event) }
     func end(_ event:NSEvent) {
         guard drawing else { return }
         drag(event)
+        if tool == .polygon {
+            drawing = false
+            let p = point(event)
+            let first = polygonPoints.first ?? p
+            let shouldClose = event.clickCount >= 2
+                || (polygonPoints.count >= 2 && hypot(p.x-first.x,p.y-first.y) < 8)
+            if let base { doc.layers[doc.active].raster = base }
+            if shouldClose {
+                drawPolygon(preview:nil,closed:true)
+                polygonPoints = []; base = nil; clearGesture(); refresh(); changed?()
+            } else {
+                polygonPoints.append(p)
+                drawPolygon(preview:nil,closed:false)
+                refresh()
+            }
+            return
+        }
         if tool == .curve {
             drawing = false
             if curveStage >= 3 { curveStage = 0; base = nil; clearGesture(); refresh(); changed?() }
@@ -379,6 +416,15 @@ final class CanvasView: NSView {
             ctx.drawPath(using: !closed || mode == 0 ? .stroke : mode == 1 ? .fill : .fillStroke)
         }
     }
+    func drawPolygon(preview:CGPoint?,closed:Bool) {
+        var points = polygonPoints
+        if let preview { points.append(preview) }
+        guard points.count >= 2 else { return }
+        let path = CGMutablePath()
+        path.addLines(between:points)
+        if closed { path.closeSubpath() }
+        paint(path,closed:closed)
+    }
     // Windows Paint curves: drag the line, then drag up to two bends before it commits.
     func drawCurve() {
         let path = CGMutablePath()
@@ -464,11 +510,11 @@ final class CanvasView: NSView {
         gestureSnapshot = nil; gestureUndo.removeAll(); gestureRedo.removeAll()
     }
     func cancelGesture() {
-        if drawing || curveStage > 0, let snapshot = gestureSnapshot {
+        if drawing || curveStage > 0 || !polygonPoints.isEmpty, let snapshot = gestureSnapshot {
             doc.restore(snapshot); doc.undoStack = gestureUndo; doc.redoStack = gestureRedo
         }
         clearGesture(); drawing = false; moving = false; floating = nil; base = nil
-        curveStage = 0
+        curveStage = 0; polygonPoints = []
         initialSelection = nil; textAnchor = nil; pendingTextRect = nil; selection = nil
         refresh(); changed?()
     }
