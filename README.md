@@ -10,12 +10,14 @@
 open build/Paint.app
 ```
 
-打包成 Releases 用的 zip：
+打包成 Releases 用的 zip 和 dmg：
 
 ```sh
-./release.sh 2.1.0            # 建置、測試並產生 build/release/Paint-mac-2.1.0.zip
+./release.sh 2.1.0            # 建置、測試並產生 build/release/Paint-mac-2.1.0.zip 與 .dmg
 ./release.sh 2.1.0 publish    # 同上，並用 gh 建立 GitHub Release
 ```
+
+zip 解壓後即可使用。dmg 打開後把 Paint 拖進「應用程式」。
 
 使用已安裝的 Command Line Tools，不需要第三方套件。建置目標為 Apple Silicon、macOS 13 以上；自動移除背景需要 macOS 14 以上。App 採本機 ad-hoc 簽署，未經 Apple 公證，第一次開啟請在 Finder 按右鍵選「打開」。
 

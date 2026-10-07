@@ -2091,7 +2091,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "小畫家 for Mac",
-            .applicationVersion: "2.0.0",
+            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.1.0",
             .credits: NSAttributedString(string: "以 Swift / AppKit 打造的原生繪圖工具，介面參考 Windows 11 小畫家。\n獨立開發，非 Microsoft 官方產品。")
         ])
     }
