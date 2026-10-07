@@ -608,6 +608,7 @@ struct GlyphPainter {
 class FluentControl: NSView {
     var onClick: (() -> Void)?
     var menuBuilder: (() -> NSMenu)?
+    var menuOnChevronOnly = false
     var isChecked = false { didSet { if isChecked != oldValue { needsDisplay = true } } }
     var isEnabledControl = true { didSet { needsDisplay = true } }
     var hovering = false
@@ -632,14 +633,16 @@ class FluentControl: NSView {
     override func mouseUp(with event: NSEvent) {
         pressing = false
         needsDisplay = true
-        guard isEnabledControl, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
-        if let builder = menuBuilder {
+        let point = convert(event.locationInWindow, from: nil)
+        guard isEnabledControl, bounds.contains(point) else { return }
+        if let builder = menuBuilder, opensMenu(at: point) {
             let menu = builder()
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.maxY + 4), in: self)
             return
         }
         onClick?()
     }
+    func opensMenu(at point: NSPoint) -> Bool { !menuOnChevronOnly || point.x >= bounds.width - 18 }
     func backdrop(_ rect: NSRect, radius: CGFloat = -1) {
         let r = radius < 0 ? Fluent.radius : radius
         if Fluent.classicChrome {
@@ -736,6 +739,12 @@ final class RibbonButton: FluentControl {
                                                        width: 9, height: 9), tint: tint, accent: accent)
             }
         }
+    }
+
+    override func opensMenu(at point: NSPoint) -> Bool {
+        guard menuOnChevronOnly else { return menuBuilder != nil }
+        if kind == .tall { return point.y >= bounds.height - 22 }
+        return point.x >= bounds.width - 18
     }
 }
 

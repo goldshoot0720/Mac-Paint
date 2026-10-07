@@ -36,7 +36,20 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     let classicPalette = ClassicPalette(frame: .zero)
     let classicMenu = ClassicMenuBar(frame: .zero)
     let classicStatus = ClassicStatusBar(frame: .zero)
+    let textBar = TextFormatBar(frame: .zero)
+    let rulerH = RulerView(frame: .zero)
+    let rulerV = RulerView(frame: .zero)
+    let thumbnail = ThumbnailView(frame: .zero)
+    let backdropWell = ColorDot(.white, diameter: 22)
     var ribbonTab = 0
+    var showRulers = false
+    var showStatus = true
+    var showThumbnail = false
+    var showToolbox = true
+    var showPalette = true
+    var showTextBar = false
+    var viewingBitmap = false
+    var pickingBackdrop = false
 
     var groups: [RibbonGroup] = []
     var toolButtons: [PaintTool: RibbonButton] = [:]
@@ -68,8 +81,10 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         window.appearance = NSAppearance(named: .aqua)
         window.titlebarAppearsTransparent = true
         window.backgroundColor = Fluent.chrome
+        window.acceptsMouseMovedEvents = true
         window.delegate = self
         window.center()
+        layerPanel.isHidden = true
 
         canvas = CanvasView(document: doc)
         buildChrome()
@@ -84,6 +99,24 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             self.statusBar.needsDisplay = true
         }
         canvas.picked = { [weak self] color in self?.apply(color: color, secondary: false) }
+        canvas.pointer = { [weak self] x, y in
+            guard let self else { return }
+            self.statusBar.cursorText = "\(x), \(y) 像素"
+            self.classicStatus.cursorText = "\(x), \(y)"
+            self.statusBar.needsDisplay = true
+            self.classicStatus.needsDisplay = true
+        }
+        canvas.pointerExited = { [weak self] in
+            self?.classicStatus.cursorText = ""
+            self?.classicStatus.needsDisplay = true
+        }
+        canvas.textChromeChanged = { [weak self] in self?.syncTextChrome() }
+        canvas.consumeClick = { [weak self] in
+            guard let self, self.viewingBitmap else { return false }
+            self.viewingBitmap = false
+            self.layoutChrome()
+            return true
+        }
         canvas.zoomRequest = { [weak self] zoomIn in
             guard let self else { return }
             self.setZoom(zoomIn ? self.canvas.zoom * 1.5 : self.canvas.zoom / 1.5)
@@ -138,12 +171,23 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         menuRow.bottomBorder = nil
         ribbon.background = Fluent.chrome
         ribbon.bottomBorder = Fluent.chromeBorder
-        workspace.background = Fluent.workspace
+        if Fluent.skin == .win10 || Fluent.skin == .win7 {
+            workspace.background = nil
+            workspace.gradientTop = Fluent.t.workspaceTop
+            workspace.gradientBottom = Fluent.t.workspaceBottom
+        } else {
+            workspace.gradientTop = nil
+            workspace.gradientBottom = nil
+            workspace.background = Fluent.workspace
+        }
+        if Fluent.skin != .win11 { layerPanel.isHidden = true }
+        viewingBitmap = false
 
         switch Fluent.skin.layout {
         case .fluent:
             root.addSubview(menuRow)
             root.addSubview(ribbon)
+            root.addSubview(textBar)
             root.addSubview(workspace)
             root.addSubview(statusBar)
             buildMenuRow()
@@ -161,6 +205,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             buildStatusBar()
         case .classic:
             root.addSubview(classicMenu)
+            root.addSubview(textBar)
             root.addSubview(workspace)
             root.addSubview(classicPalette)
             root.addSubview(classicStatus)
@@ -168,6 +213,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             buildWorkspace()
             buildClassicExtras()
         }
+        wireTextBar()
         root.onLayout = { [weak self] in self?.layoutChrome() }
         root.needsLayout = true
         root.needsDisplay = true
@@ -225,7 +271,9 @@ final class PaintController: NSWindowController, NSWindowDelegate {
 
     func buildTabStrip() {
         tabStrip.tabs = ["常用", "檢視"]
+        tabStrip.paintButton = Fluent.skin == .win7
         tabStrip.activeIndex = ribbonTab
+        tabStrip.toolTip = Fluent.skin == .win7 ? "小畫家" : "檔案"
         tabStrip.onFile = { [weak self] in
             guard let self else { return }
             self.fileMenu().popUp(positioning: nil, at: NSPoint(x: 2, y: self.tabStrip.bounds.maxY),
@@ -262,6 +310,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     // MARK: Ribbon groups
 
     func buildRibbon() {
+        brushButton = nil
+        if Fluent.skin.layout == .ribbon && ribbonTab == 2 { buildTextTab(); return }
         if Fluent.skin.layout == .ribbon && ribbonTab == 1 { buildViewTab(); return }
         if Fluent.skin.layout == .ribbon { buildClipboardGroup() }
         buildImageGroup()
@@ -270,8 +320,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         buildShapesGroup()
         if Fluent.skin.layout == .ribbon { buildSizeGroup() }
         buildColorGroup()
-        if Fluent.skin.layout == .fluent { buildCopilotGroup() }
-        buildLayersGroup()
+        if Fluent.skin.layout == .fluent { buildCopilotGroup(); buildLayersGroup() }
     }
 
     func buildClipboardGroup() {
@@ -293,7 +342,12 @@ final class PaintController: NSWindowController, NSWindowDelegate {
                                     kind: .tall, chevron: true, width: 48, height: 60)
         selectButton.glyphSize = 22
         selectButton.toolTip = "選取項目"
-        selectButton.onClick = { [weak self] in self?.selectTool(.select) }
+        selectButton.menuOnChevronOnly = true
+        selectButton.menuBuilder = { [weak self] in self?.selectionMenu() ?? NSMenu() }
+        selectButton.onClick = { [weak self] in
+            self?.canvas.freeSelect = false
+            self?.selectTool(.select)
+        }
         selectButton.setFrameOrigin(NSPoint(x: 8, y: 4))
         toolButtons[.select] = selectButton
 
@@ -343,6 +397,20 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     }
 
     func buildBrushGroup() {
+        if Fluent.skin.layout == .ribbon {
+            var views: [NSView] = []
+            for (index, tool) in PaintTool.brushes.enumerated() {
+                let button = RibbonButton(tool.glyph, kind: .grid, width: 34, height: 34)
+                button.glyphSize = 18
+                button.toolTip = tool.rawValue
+                button.onClick = { [weak self] in self?.selectTool(tool) }
+                button.setFrameOrigin(NSPoint(x: 8 + CGFloat(index % 2) * 36, y: 6 + CGFloat(index / 2) * 36))
+                toolButtons[tool] = button
+                views.append(button)
+            }
+            _ = group("筆刷", 86, views)
+            return
+        }
         brushButton = RibbonButton(activeBrush.glyph, kind: .tall, chevron: false, width: 46, height: 46)
         brushButton.glyphSize = 22
         brushButton.toolTip = "筆刷"
@@ -377,6 +445,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     }
 
     func buildColorGroup() {
+        colors.showsRecent = Fluent.skin == .win11
+        colors.showsEditorWheel = Fluent.skin == .win11
         colors.frame = NSRect(x: 8, y: 4, width: ColorGroup.intrinsicWidth, height: 74)
         colors.onPick = { [weak self] color, secondary in self?.apply(color: color, secondary: secondary) }
         colors.onSelectWell = { [weak self] primary in
@@ -391,10 +461,10 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     }
 
     func buildCopilotGroup() {
-        let copilot = RibbonButton(.copilot, caption: "Copilot", kind: .tall, chevron: false, width: 54, height: 62)
+        let copilot = RibbonButton(.copilot, caption: "Copilot", kind: .tall, chevron: true, width: 54, height: 62)
         copilot.glyphSize = 24
-        copilot.toolTip = "AI 工具"
-        copilot.onClick = { [weak self] in self?.copilotAction(nil) }
+        copilot.toolTip = "Copilot"
+        copilot.menuBuilder = { [weak self] in self?.copilotMenu() ?? NSMenu() }
         copilot.setFrameOrigin(NSPoint(x: 8, y: 8))
         _ = group("", 70, [copilot])
     }
@@ -425,19 +495,31 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         actual.setFrameOrigin(NSPoint(x: 132, y: 8))
         _ = group("縮放", 200, [zoomIn, zoomOut, actual])
 
+        let rulers = tall(.thickness, "尺規") { [weak self] in self?.toggleRulers() }
+        rulers.isChecked = showRulers
+        rulers.setFrameOrigin(NSPoint(x: 8, y: 8))
         let grid = tall(.grid, "格線") { [weak self] in self?.gridAction(nil) }
         grid.isChecked = canvas.grid
-        grid.setFrameOrigin(NSPoint(x: 8, y: 8))
-        let layersToggle = tall(.layers, "圖層面板") { [weak self] in self?.toggleLayers(nil) }
-        layersToggle.isChecked = !layerPanel.isHidden
-        layersToggle.setFrameOrigin(NSPoint(x: 70, y: 8))
-        _ = group("顯示或隱藏", 140, [grid, layersToggle])
+        grid.setFrameOrigin(NSPoint(x: 70, y: 8))
+        let status = tall(.canvasSize, "狀態列") { [weak self] in self?.toggleStatusBar() }
+        status.isChecked = showStatus
+        status.setFrameOrigin(NSPoint(x: 132, y: 8))
+        _ = group("顯示或隱藏", 200, [rulers, grid, status])
 
-        let fit = tall(.fitWindow, "符合視窗") { [weak self] in self?.fitCanvas(nil) }
-        fit.setFrameOrigin(NSPoint(x: 8, y: 8))
-        let full = tall(.marquee, "全螢幕") { [weak self] in self?.window?.toggleFullScreen(nil) }
-        full.setFrameOrigin(NSPoint(x: 70, y: 8))
-        let container = group("顯示", 140, [fit, full])
+        let full = tall(.fitWindow, "全螢幕") { [weak self] in self?.window?.toggleFullScreen(nil) }
+        full.setFrameOrigin(NSPoint(x: 8, y: 8))
+        let thumb = tall(.duplicate, "縮圖") { [weak self] in self?.toggleThumbnail() }
+        thumb.isChecked = showThumbnail
+        thumb.setFrameOrigin(NSPoint(x: 70, y: 8))
+        let container = group("顯示", 140, [full, thumb])
+        container.showsSeparator = false
+    }
+
+    func buildTextTab() {
+        textBar.sync(name: canvas.fontName, size: canvas.fontSize, bold: canvas.boldText,
+                     italic: canvas.italicText, underline: canvas.underlineText)
+        textBar.frame = NSRect(x: 8, y: 8, width: 420, height: 70)
+        let container = group("字型", 440, [textBar])
         container.showsSeparator = false
     }
 
@@ -465,9 +547,28 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     }
 
     func buildClassicExtras() {
-        toolbox.onSelect = { [weak self] tool in self?.selectTool(tool) }
+        toolbox.onSelect = { [weak self] tool, free in
+            guard let self else { return }
+            self.canvas.freeSelect = free
+            self.selectTool(tool)
+        }
         toolbox.onWidth = { [weak self] width in
             guard let self else { return }
+            self.canvas.lineWidth = width
+            self.dock.sizeSlider.value = Double(width)
+        }
+        toolbox.onZoom = { [weak self] level in
+            self?.toolbox.zoomLevel = level
+            self?.setZoom(level)
+        }
+        toolbox.onShapeStyle = { [weak self] style in self?.setShapeStyle(style) }
+        toolbox.onTransparent = { [weak self] transparent in
+            self?.canvas.drawOpaque = !transparent
+            self?.toolbox.transparent = transparent
+        }
+        toolbox.onBrushTip = { [weak self] tip, width in
+            guard let self else { return }
+            self.canvas.brushTip = tip
             self.canvas.lineWidth = width
             self.dock.sizeSlider.value = Double(width)
         }
@@ -528,7 +629,73 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         }
         layerOpacity.onChange = { [weak self] value in self?.setLayerOpacity(value) }
         layerPanel.addSubview(layerOpacity)
+        backdropWell.toolTip = "畫布底色"
+        backdropWell.onPick = { [weak self] _, _ in self?.pickBackdrop() }
+        layerPanel.addSubview(backdropWell)
         workspace.addSubview(layerPanel)
+        rulerH.horizontal = true
+        rulerV.horizontal = false
+        workspace.addSubview(rulerH)
+        workspace.addSubview(rulerV)
+        workspace.addSubview(thumbnail)
+    }
+
+    func wireTextBar() {
+        textBar.onFont = { [weak self] name in
+            self?.canvas.fontName = name
+            self?.textBar.fontName = name
+        }
+        textBar.onSize = { [weak self] size in
+            self?.canvas.fontSize = size
+            self?.textBar.fontSize = size
+        }
+        textBar.onToggle = { [weak self] which in
+            guard let self else { return }
+            switch which {
+            case "bold": self.canvas.boldText.toggle()
+            case "italic": self.canvas.italicText.toggle()
+            case "underline": self.canvas.underlineText.toggle()
+            default: break
+            }
+            self.textBar.sync(name: self.canvas.fontName, size: self.canvas.fontSize,
+                              bold: self.canvas.boldText, italic: self.canvas.italicText,
+                              underline: self.canvas.underlineText)
+        }
+    }
+
+    func wantsTextStrip() -> Bool {
+        let editing = canvas.tool == .text || canvas.textEditor != nil
+        if Fluent.skin == .win11 { return editing }
+        if Fluent.skin == .winxp { return showTextBar }
+        return false
+    }
+
+    var syncingText = false
+    func syncTextChrome() {
+        if syncingText { return }
+        syncingText = true
+        defer { syncingText = false }
+        let editing = canvas.tool == .text || canvas.textEditor != nil
+        if Fluent.skin == .winxp && editing { showTextBar = true }
+        if Fluent.skin.layout == .ribbon {
+            let tabs = editing ? ["常用", "檢視", "文字"] : ["常用", "檢視"]
+            let changed = tabStrip.tabs != tabs || (editing && ribbonTab != 2) || (!editing && ribbonTab > 1)
+            tabStrip.tabs = tabs
+            if editing { ribbonTab = 2 } else if ribbonTab > 1 { ribbonTab = 0 }
+            if changed {
+                for view in ribbon.subviews { view.removeFromSuperview() }
+                groups.removeAll()
+                toolButtons.removeAll()
+                buildRibbon()
+                applyToolChecks()
+            }
+            tabStrip.activeIndex = ribbonTab
+            tabStrip.needsDisplay = true
+        }
+        textBar.sync(name: canvas.fontName, size: canvas.fontSize, bold: canvas.boldText,
+                     italic: canvas.italicText, underline: canvas.underlineText)
+        root.needsLayout = true
+        layoutChrome()
     }
 
     func buildStatusBar() {
@@ -545,23 +712,52 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     func layoutChrome() {
         let size = root.bounds.size
         let tokens = Fluent.t
+        if Fluent.skin != .win11 { layerPanel.isHidden = true }
+        let statusHeight = showStatus && !viewingBitmap ? tokens.statusHeight : 0
+        statusBar.isHidden = statusHeight == 0 || Fluent.skin == .winxp
+        classicStatus.isHidden = statusHeight == 0 || Fluent.skin != .winxp
+        if viewingBitmap {
+            classicMenu.isHidden = true
+            menuRow.isHidden = true
+            tabStrip.isHidden = true
+            ribbon.isHidden = true
+            textBar.isHidden = true
+            classicPalette.isHidden = true
+            toolbox.isHidden = true
+            workspace.frame = NSRect(x: 0, y: 0, width: size.width, height: size.height)
+            scroll.frame = workspace.bounds
+            rulerH.isHidden = true
+            rulerV.isHidden = true
+            thumbnail.isHidden = true
+            layerPanel.isHidden = true
+            dock.isHidden = true
+            layoutStage()
+            return
+        }
+        classicMenu.isHidden = false
+        menuRow.isHidden = false
+        tabStrip.isHidden = false
+        ribbon.isHidden = false
         switch Fluent.skin.layout {
         case .classic:
+            let textHeight: CGFloat = wantsTextStrip() ? 32 : 0
+            textBar.isHidden = textHeight == 0
+            textBar.frame = NSRect(x: 0, y: tokens.menuHeight, width: size.width, height: textHeight)
             classicMenu.frame = NSRect(x: 0, y: 0, width: size.width, height: tokens.menuHeight)
-            let paletteHeight = ClassicPalette.preferredHeight
-            let workHeight = max(120, size.height - tokens.menuHeight - paletteHeight - tokens.statusHeight)
-            workspace.frame = NSRect(x: 0, y: tokens.menuHeight, width: size.width, height: workHeight)
-            classicPalette.frame = NSRect(x: 0, y: tokens.menuHeight + workHeight,
-                                          width: size.width, height: paletteHeight)
-            classicStatus.frame = NSRect(x: 0, y: size.height - tokens.statusHeight,
-                                         width: size.width, height: tokens.statusHeight)
-            toolbox.frame = NSRect(x: 0, y: 0, width: ToolboxView.preferredWidth, height: workHeight)
-            let panelWidth = layerPanel.isHidden ? 0 : PaintController.layerWidth
-            scroll.frame = NSRect(x: ToolboxView.preferredWidth, y: 0,
-                                  width: max(80, size.width - ToolboxView.preferredWidth - panelWidth),
-                                  height: workHeight)
-            layerPanel.frame = NSRect(x: size.width - panelWidth, y: 0, width: panelWidth, height: workHeight)
+            let paletteHeight = showPalette ? ClassicPalette.preferredHeight : 0
+            classicPalette.isHidden = paletteHeight == 0
+            let workTop = tokens.menuHeight + textHeight
+            let workHeight = max(120, size.height - workTop - paletteHeight - statusHeight)
+            workspace.frame = NSRect(x: 0, y: workTop, width: size.width, height: workHeight)
+            classicPalette.frame = NSRect(x: 0, y: workTop + workHeight, width: size.width, height: paletteHeight)
+            classicStatus.frame = NSRect(x: 0, y: size.height - statusHeight, width: size.width, height: statusHeight)
+            let toolWidth = showToolbox ? ToolboxView.preferredWidth : 0
+            toolbox.isHidden = toolWidth == 0
+            toolbox.frame = NSRect(x: 0, y: 0, width: toolWidth, height: workHeight)
+            scroll.frame = NSRect(x: toolWidth, y: 0, width: max(80, size.width - toolWidth), height: workHeight)
+            layerPanel.frame = .zero
         default:
+            textBar.isHidden = Fluent.skin != .win11 || !wantsTextStrip()
             let topHeight = tokens.menuHeight
             if Fluent.skin.layout == .fluent {
                 menuRow.frame = NSRect(x: 0, y: 0, width: size.width, height: topHeight)
@@ -571,25 +767,48 @@ final class PaintController: NSWindowController, NSWindowDelegate {
                 layoutTabStrip()
             }
             ribbon.frame = NSRect(x: 0, y: topHeight, width: size.width, height: tokens.ribbonHeight)
-            let workTop = topHeight + tokens.ribbonHeight
-            let workHeight = max(120, size.height - workTop - tokens.statusHeight)
+            let textHeight: CGFloat = textBar.isHidden ? 0 : 34
+            textBar.frame = NSRect(x: 0, y: topHeight + tokens.ribbonHeight, width: size.width, height: textHeight)
+            let workTop = topHeight + tokens.ribbonHeight + textHeight
+            let workHeight = max(120, size.height - workTop - statusHeight)
             workspace.frame = NSRect(x: 0, y: workTop, width: size.width, height: workHeight)
-            statusBar.frame = NSRect(x: 0, y: workTop + workHeight,
-                                     width: size.width, height: tokens.statusHeight)
+            statusBar.frame = NSRect(x: 0, y: workTop + workHeight, width: size.width, height: statusHeight)
             layoutRibbon()
             let panelWidth = layerPanel.isHidden ? 0 : PaintController.layerWidth
-            scroll.frame = NSRect(x: 0, y: 0, width: max(80, size.width - panelWidth), height: workHeight)
+            let ruler = showRulers ? 18.0 : 0
+            rulerH.isHidden = !showRulers
+            rulerV.isHidden = !showRulers
+            rulerH.frame = NSRect(x: ruler, y: 0, width: max(0, size.width - panelWidth - ruler), height: ruler)
+            rulerV.frame = NSRect(x: 0, y: ruler, width: ruler, height: max(0, workHeight - ruler))
+            scroll.frame = NSRect(x: ruler, y: ruler,
+                                  width: max(80, size.width - panelWidth - ruler),
+                                  height: max(80, workHeight - ruler))
             layerPanel.frame = NSRect(x: size.width - panelWidth, y: 0, width: panelWidth, height: workHeight)
             if Fluent.skin.layout == .fluent {
                 let dockHeight = min(260, max(150, workHeight - 80))
-                dock.frame = NSRect(x: 14, y: (workHeight - dockHeight) / 2,
+                dock.frame = NSRect(x: 14 + ruler, y: (workHeight - dockHeight) / 2,
                                     width: SliderDock.preferredWidth, height: dockHeight)
                 dock.isHidden = !canvas.tool.usesSize
             }
         }
+        thumbnail.isHidden = !showThumbnail
+        thumbnail.frame = NSRect(x: scroll.frame.maxX - 168, y: scroll.frame.maxY - 128, width: 160, height: 120)
+        scroll.drawsBackground = Fluent.skin == .winxp || Fluent.skin == .win11
         scroll.backgroundColor = Fluent.workspace
+        updateRulers()
         layoutLayerPanel()
         layoutStage()
+    }
+
+    func updateRulers() {
+        guard showRulers else { return }
+        rulerH.scale = canvas.zoom
+        rulerV.scale = canvas.zoom
+        let origin = scroll.contentView.bounds.origin
+        rulerH.origin = origin.x / max(canvas.zoom, 0.01) - canvas.frame.minX / max(canvas.zoom, 0.01)
+        rulerV.origin = origin.y / max(canvas.zoom, 0.01) - canvas.frame.minY / max(canvas.zoom, 0.01)
+        rulerH.needsDisplay = true
+        rulerV.needsDisplay = true
     }
 
     func layoutLayerPanel() {
@@ -611,8 +830,9 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         layerOpacity.frame = NSRect(x: 12, y: bottom - 22, width: max(40, width - 24), height: 20)
         bottom -= 30
         if let add = tools.first(where: { $0.identifier?.rawValue == "layer-add" }) {
-            add.setFrameOrigin(NSPoint(x: max(8, width - 40), y: 10))
+            add.setFrameOrigin(NSPoint(x: max(8, width - 40), y: 36))
         }
+        backdropWell.setFrameOrigin(NSPoint(x: 12, y: 8))
         layerScroll.frame = NSRect(x: 8, y: 44, width: max(40, width - 16), height: max(60, bottom - 52))
         layoutLayerRows()
     }
@@ -650,8 +870,21 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         classicStatus.canvasText = "\(doc.width) × \(doc.height)"
         classicStatus.needsDisplay = true
         canvas.refresh()
+        thumbnail.image = NSImage(cgImage: doc.composite().image,
+                                  size: NSSize(width: doc.width, height: doc.height))
         layoutStage()
+        updateRulers()
         rebuildLayers()
+    }
+
+    func applyToolChecks() {
+        for (candidate, button) in toolButtons { button.isChecked = candidate == canvas.tool }
+        brushButton?.isChecked = PaintTool.brushes.contains(canvas.tool)
+        gallery.select(canvas.tool)
+        toolbox.select(canvas.tool, free: canvas.freeSelect)
+        toolbox.shapeStyle = canvas.shapeFill
+        toolbox.transparent = !canvas.drawOpaque
+        if canvas.brushTip >= 0 { toolbox.brushTip = canvas.brushTip }
     }
 
     func selectTool(_ tool: PaintTool) {
@@ -660,18 +893,15 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             activeBrush = tool
             brushButton?.glyph = tool.glyph
             brushButton?.needsDisplay = true
+            if tool != .brush { canvas.brushTip = -1 }
         }
-        for (candidate, button) in toolButtons { button.isChecked = candidate == tool }
-        brushButton?.isChecked = PaintTool.brushes.contains(tool)
-        gallery.select(tool)
-        toolbox.select(tool)
+        applyToolChecks()
         dock.isHidden = !tool.usesSize
         outlineButton?.isEnabledControl = tool.isShape
         fillButton?.isEnabledControl = tool.isShape
         statusBar.cursorText = tool.rawValue
         statusBar.needsDisplay = true
-        classicStatus.hint = tool.rawValue
-        classicStatus.needsDisplay = true
+        syncTextChrome()
         window?.makeFirstResponder(canvas)
     }
 
@@ -699,6 +929,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     }
 
     func fileMenu() -> NSMenu {
+        if Fluent.skin == .winxp { return classicFileMenu() }
         let menu = NSMenu()
         item(menu, "新增") { [weak self] in self?.newDocument(nil) }
         item(menu, "開啟…") { [weak self] in self?.openDocument(nil) }
@@ -708,11 +939,48 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         item(menu, "匯出圖片…") { [weak self] in self?.exportImage(nil) }
         menu.addItem(.separator())
         item(menu, "列印…") { [weak self] in self?.printAction(nil) }
-        item(menu, "影像內容…") { [weak self] in self?.resizeAction(nil) }
+        item(menu, "調整大小和扭曲…") { [weak self] in self?.resizeAction(nil) }
+        return menu
+    }
+
+    func classicFileMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "開新檔案(N)") { [weak self] in self?.newDocument(nil) }
+        item(menu, "開啟舊檔(O)") { [weak self] in self?.openDocument(nil) }
+        item(menu, "存檔(S)") { [weak self] in _ = self?.save() }
+        item(menu, "另存新檔(A)") { [weak self] in _ = self?.save(asNew: true) }
+        menu.addItem(.separator())
+        let scan = NSMenuItem(title: "從掃描器或照相機…", action: nil, keyEquivalent: "")
+        scan.isEnabled = false
+        menu.addItem(scan)
+        menu.addItem(.separator())
+        item(menu, "預覽列印(V)") { [weak self] in self?.printAction(nil) }
+        item(menu, "列印設定(U)") { NSPageLayout().runModal() }
+        item(menu, "列印(P)") { [weak self] in self?.printAction(nil) }
+        menu.addItem(.separator())
+        item(menu, "傳送到(D)") { [weak self] in self?.shareAction(nil) }
+        let wall = NSMenuItem(title: "設定成桌布(B)", action: nil, keyEquivalent: "")
+        let wallMenu = NSMenu()
+        wall.submenu = wallMenu
+        wallMenu.addItem(BlockMenuItem(title: "並排(T)") { [weak self] in self?.setWallpaper(.scaleProportionallyUpOrDown) })
+        wallMenu.addItem(BlockMenuItem(title: "置中(C)") { [weak self] in self?.setWallpaper(.scaleNone) })
+        wallMenu.addItem(BlockMenuItem(title: "延伸(S)") { [weak self] in self?.setWallpaper(.scaleAxesIndependently) })
+        menu.addItem(wall)
+        let recent = UserDefaults.standard.stringArray(forKey: "paint.recent") ?? []
+        if !recent.isEmpty {
+            menu.addItem(.separator())
+            for path in recent.prefix(4) {
+                let name = URL(fileURLWithPath: path).lastPathComponent
+                item(menu, name) { [weak self] in self?.open(URL(fileURLWithPath: path)) }
+            }
+        }
+        menu.addItem(.separator())
+        item(menu, "結束(X)") { NSApp.terminate(nil) }
         return menu
     }
 
     func editMenu() -> NSMenu {
+        if Fluent.skin == .winxp { return classicEditMenu() }
         let menu = NSMenu()
         item(menu, "復原") { [weak self] in self?.undoAction(nil) }
         item(menu, "重做") { [weak self] in self?.redoAction(nil) }
@@ -726,7 +994,24 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         return menu
     }
 
+    func classicEditMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "復原(U)") { [weak self] in self?.undoAction(nil) }
+        item(menu, "重複(R)") { [weak self] in self?.redoAction(nil) }
+        menu.addItem(.separator())
+        item(menu, "剪下(T)") { [weak self] in self?.cutAction(nil) }
+        item(menu, "複製(C)") { [weak self] in self?.copyAction(nil) }
+        item(menu, "貼上(P)") { [weak self] in self?.pasteAction(nil) }
+        item(menu, "清除選取範圍(L)") { [weak self] in self?.clearAction(nil) }
+        item(menu, "全選(A)") { [weak self] in self?.selectAllAction(nil) }
+        menu.addItem(.separator())
+        item(menu, "複製到(O)…") { [weak self] in self?.copyToFile() }
+        item(menu, "貼上來源(F)…") { [weak self] in self?.pasteFromFile() }
+        return menu
+    }
+
     func viewMenu() -> NSMenu {
+        if Fluent.skin == .winxp { return classicViewMenu() }
         let menu = NSMenu()
         item(menu, "放大") { [weak self] in self?.setZoom((self?.canvas.zoom ?? 1) * 1.25) }
         item(menu, "縮小") { [weak self] in self?.setZoom((self?.canvas.zoom ?? 1) / 1.25) }
@@ -734,13 +1019,72 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         item(menu, "符合視窗") { [weak self] in self?.fitCanvas(nil) }
         menu.addItem(.separator())
         item(menu, "格線", { [weak self] in self?.gridAction(nil) }, checked: canvas.grid)
-        item(menu, "圖層面板", { [weak self] in self?.toggleLayers(nil) }, checked: !layerPanel.isHidden)
+        if Fluent.skin == .win11 {
+            item(menu, "圖層面板", { [weak self] in self?.toggleLayers(nil) }, checked: !layerPanel.isHidden)
+        }
         menu.addItem(.separator())
         let appearance = NSMenuItem(title: "外觀", action: nil, keyEquivalent: "")
         appearance.submenu = skinMenu()
         menu.addItem(appearance)
         menu.addItem(.separator())
         item(menu, "全螢幕") { [weak self] in self?.window?.toggleFullScreen(nil) }
+        return menu
+    }
+
+    func classicViewMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "工具箱(T)", { [weak self] in self?.toggleToolbox() }, checked: showToolbox)
+        item(menu, "調色盤(C)", { [weak self] in self?.togglePalette() }, checked: showPalette)
+        item(menu, "狀態列(S)", { [weak self] in self?.toggleStatusBar() }, checked: showStatus)
+        item(menu, "文字工具列(E)", { [weak self] in self?.toggleTextBar() }, checked: showTextBar)
+        menu.addItem(.separator())
+        let zoom = NSMenuItem(title: "縮放(Z)", action: nil, keyEquivalent: "")
+        let zoomMenu = NSMenu()
+        zoom.submenu = zoomMenu
+        zoomMenu.addItem(BlockMenuItem(title: "一般大小(N)") { [weak self] in self?.setZoom(1) })
+        zoomMenu.addItem(BlockMenuItem(title: "大尺寸(L)") { [weak self] in self?.setZoom(4) })
+        zoomMenu.addItem(BlockMenuItem(title: "自訂(U)…") { [weak self] in self?.customZoom() })
+        zoomMenu.addItem(.separator())
+        zoomMenu.addItem(BlockMenuItem(title: "顯示格線(G)") { [weak self] in self?.gridAction(nil) })
+        zoomMenu.addItem(BlockMenuItem(title: "顯示縮圖(T)") { [weak self] in self?.toggleThumbnail() })
+        menu.addItem(zoom)
+        item(menu, "檢視點陣圖(V)") { [weak self] in self?.toggleBitmapView() }
+        menu.addItem(.separator())
+        let appearance = NSMenuItem(title: "外觀", action: nil, keyEquivalent: "")
+        appearance.submenu = skinMenu()
+        menu.addItem(appearance)
+        return menu
+    }
+
+    func selectionMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "矩形選取", { [weak self] in
+            self?.canvas.freeSelect = false
+            self?.selectTool(.select)
+        }, checked: canvas.tool == .select && !canvas.freeSelect)
+        item(menu, "任意選取", { [weak self] in
+            self?.canvas.freeSelect = true
+            self?.selectTool(.select)
+        }, checked: canvas.tool == .select && canvas.freeSelect)
+        menu.addItem(.separator())
+        item(menu, "全選") { [weak self] in self?.selectAllAction(nil) }
+        item(menu, "反轉選取") { [weak self] in self?.canvas.invertSelection(); self?.update() }
+        item(menu, "刪除") { [weak self] in self?.clearAction(nil) }
+        menu.addItem(.separator())
+        item(menu, "透明選取", { [weak self] in
+            guard let self else { return }
+            self.canvas.drawOpaque.toggle()
+            self.toolbox.transparent = !self.canvas.drawOpaque
+        }, checked: !canvas.drawOpaque)
+        return menu
+    }
+
+    func copilotMenu() -> NSMenu {
+        let menu = NSMenu()
+        item(menu, "影像建立") { [weak self] in self?.unavailableAI("影像建立") }
+        item(menu, "生成擦除") { [weak self] in self?.unavailableAI("生成擦除") }
+        item(menu, "移除背景") { [weak self] in self?.removeBackground(nil) }
+        item(menu, "Cocreator") { [weak self] in self?.unavailableAI("Cocreator") }
         return menu
     }
 
@@ -820,15 +1164,16 @@ final class PaintController: NSWindowController, NSWindowDelegate {
 
     func imageMenu() -> NSMenu {
         let menu = NSMenu()
-        item(menu, "翻轉/旋轉…") { [weak self] in self?.transform("rotate") }
-        item(menu, "水平翻轉") { [weak self] in self?.transform("horizontal") }
-        item(menu, "垂直翻轉") { [weak self] in self?.transform("vertical") }
-        menu.addItem(.separator())
-        item(menu, "屬性…") { [weak self] in self?.resizeAction(nil) }
-        item(menu, "裁剪") { [weak self] in self?.cropAction(nil) }
-        item(menu, "清除影像") { [weak self] in self?.clearAction(nil) }
-        menu.addItem(.separator())
-        item(menu, "移除背景") { [weak self] in self?.removeBackground(nil) }
+        item(menu, "翻轉/旋轉(F)…") { [weak self] in self?.flipRotateDialog() }
+        item(menu, "延展/扭曲(S)…") { [weak self] in self?.stretchDialog() }
+        item(menu, "反轉色彩(I)") { [weak self] in self?.invertColors() }
+        item(menu, "屬性(A)…") { [weak self] in self?.attributesDialog() }
+        item(menu, "清除影像(C)") { [weak self] in self?.clearImage() }
+        item(menu, "繪製不透明(D)", { [weak self] in
+            guard let self else { return }
+            self.canvas.drawOpaque.toggle()
+            self.toolbox.transparent = !self.canvas.drawOpaque
+        }, checked: canvas.drawOpaque)
         return menu
     }
 
@@ -840,7 +1185,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
 
     func helpMenu() -> NSMenu {
         let menu = NSMenu()
-        item(menu, "關於小畫家") { NSApp.orderFrontStandardAboutPanel(nil) }
+        item(menu, "說明主題(H)") { [weak self] in self?.helpTopic() }
+        item(menu, "關於小畫家(A)") { NSApp.orderFrontStandardAboutPanel(nil) }
         return menu
     }
 
@@ -979,6 +1325,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         }
     }
     @objc func toggleLayers(_ sender: Any?) {
+        guard Fluent.skin == .win11 else { return }
         layerPanel.isHidden.toggle()
         layersButton?.isChecked = !layerPanel.isHidden
         root.needsLayout = true
@@ -1028,6 +1375,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     // MARK: Colour
 
     @objc func editColor(_ sender: Any?) {
+        pickingBackdrop = false
         let panel = NSColorPanel.shared
         panel.setTarget(self)
         panel.setAction(#selector(colorPanelChanged))
@@ -1035,6 +1383,12 @@ final class PaintController: NSWindowController, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
     }
     @objc func colorPanelChanged(_ sender: NSColorPanel) {
+        if pickingBackdrop {
+            canvas.backdrop = sender.color
+            backdropWell.color = sender.color
+            canvas.needsDisplay = true
+            return
+        }
         apply(color: sender.color, secondary: !editingPrimary)
     }
 
@@ -1079,6 +1433,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             else { next.layers = [PaintLayer(name: "背景", raster: try Raster.load(url))] }
             next.url = url
             next.savedRevision = next.revision
+            rememberRecent(url)
             doc = next
             canvas.doc = next
             canvas.selection = nil
@@ -1110,6 +1465,7 @@ final class PaintController: NSWindowController, NSWindowDelegate {
             else { try doc.composite().write(url) }
             doc.url = url
             doc.savedRevision = doc.revision
+            rememberRecent(url)
             update()
             return true
         } catch { showError(error); return false }
@@ -1199,8 +1555,8 @@ final class PaintController: NSWindowController, NSWindowDelegate {
     @objc func selectAllAction(_ sender: Any?) {
         if let text = NSApp.keyWindow?.firstResponder as? NSTextView { text.selectAll(sender); return }
         selectTool(.select)
-        canvas.selection = CGRect(x: 0, y: 0, width: doc.width, height: doc.height)
-        canvas.needsDisplay = true
+        canvas.freeSelect = false
+        canvas.selectAll()
         update()
     }
     @objc func copyAction(_ sender: Any?) {
@@ -1263,43 +1619,261 @@ final class PaintController: NSWindowController, NSWindowDelegate {
 
     @objc func resizeAction(_ sender: Any?) {
         canvas.finishText()
+        let mode = NSPopUpButton(frame: NSRect(x: 0, y: 108, width: 140, height: 26))
+        mode.addItems(withTitles: ["百分比", "像素"])
+        mode.selectItem(at: 1)
         let width = NSTextField(string: String(doc.width))
         let height = NSTextField(string: String(doc.height))
-        width.frame = NSRect(x: 40, y: 64, width: 96, height: 24)
-        height.frame = NSRect(x: 190, y: 64, width: 96, height: 24)
+        width.frame = NSRect(x: 48, y: 72, width: 90, height: 24)
+        height.frame = NSRect(x: 200, y: 72, width: 90, height: 24)
         let widthLabel = NSTextField(labelWithString: "水平")
-        widthLabel.frame = NSRect(x: 0, y: 68, width: 38, height: 18)
+        widthLabel.frame = NSRect(x: 0, y: 76, width: 44, height: 18)
         let heightLabel = NSTextField(labelWithString: "垂直")
-        heightLabel.frame = NSRect(x: 148, y: 68, width: 38, height: 18)
+        heightLabel.frame = NSRect(x: 152, y: 76, width: 44, height: 18)
+        let skewX = NSTextField(string: "0")
+        let skewY = NSTextField(string: "0")
+        skewX.frame = NSRect(x: 48, y: 40, width: 90, height: 24)
+        skewY.frame = NSRect(x: 200, y: 40, width: 90, height: 24)
+        let skewXLabel = NSTextField(labelWithString: "水平扭曲")
+        skewXLabel.frame = NSRect(x: 0, y: 44, width: 48, height: 18)
+        let skewYLabel = NSTextField(labelWithString: "垂直扭曲")
+        skewYLabel.frame = NSRect(x: 148, y: 44, width: 52, height: 18)
         let ratio = NSButton(checkboxWithTitle: "維持外觀比例", target: nil, action: nil)
-        ratio.frame = NSRect(x: 0, y: 36, width: 300, height: 20)
+        ratio.frame = NSRect(x: 0, y: 8, width: 160, height: 20)
         ratio.state = .on
-        let scale = NSButton(checkboxWithTitle: "縮放影像內容（取消則只改畫布大小）", target: nil, action: nil)
-        scale.frame = NSRect(x: 0, y: 10, width: 320, height: 20)
+        let scale = NSButton(checkboxWithTitle: "縮放影像內容", target: nil, action: nil)
+        scale.frame = NSRect(x: 168, y: 8, width: 140, height: 20)
         scale.state = .on
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 330, height: 96))
-        for view in [widthLabel, width, heightLabel, height, ratio, scale] { container.addSubview(view) }
-        let alert = NSAlert()
-        alert.messageText = "調整大小和扭曲"
-        alert.informativeText = "每邊 1–8192 像素，最多 2,400 萬像素。"
-        alert.accessoryView = container
-        alert.addButton(withTitle: "確定")
-        alert.addButton(withTitle: "取消")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let newWidth = width.integerValue
-        let newHeight = ratio.state == .on
-            ? Int((Double(newWidth) * Double(doc.height) / Double(doc.width)).rounded())
-            : height.integerValue
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 140))
+        for view in [mode, widthLabel, width, heightLabel, height, skewXLabel, skewX, skewYLabel, skewY, ratio, scale] {
+            container.addSubview(view)
+        }
+        guard modal("調整大小和扭曲", "每邊 1–8192 像素，最多 2,400 萬像素。扭曲單位是度。", container) else { return }
+        let percent = mode.indexOfSelectedItem == 0
+        var newWidth = width.integerValue
+        var newHeight = height.integerValue
+        if percent {
+            newWidth = Int((Double(doc.width) * Double(newWidth) / 100).rounded())
+            newHeight = Int((Double(doc.height) * Double(newHeight) / 100).rounded())
+        }
+        if ratio.state == .on {
+            newHeight = percent
+                ? Int((Double(doc.height) * Double(width.integerValue) / 100).rounded())
+                : Int((Double(newWidth) * Double(doc.height) / Double(max(doc.width, 1))).rounded())
+        }
         guard newWidth > 0, newHeight > 0, newWidth <= 8192, newHeight <= 8192,
               newWidth * newHeight <= 24_000_000 else {
             showError(PaintError.message("請輸入有效尺寸。")); return
         }
         doc.checkpoint()
         for index in doc.layers.indices {
-            doc.layers[index].raster = doc.layers[index].raster.resized(newWidth, newHeight, scale: scale.state == .on)
+            var raster = doc.layers[index].raster.resized(newWidth, newHeight, scale: scale.state == .on)
+            raster = raster.skewed(horizontal: skewX.doubleValue, vertical: skewY.doubleValue)
+            doc.layers[index].raster = raster
         }
         canvas.selection = nil
         update()
+    }
+
+    func stretchDialog() {
+        canvas.finishText()
+        let width = NSTextField(string: "100")
+        let height = NSTextField(string: "100")
+        let skewX = NSTextField(string: "0")
+        let skewY = NSTextField(string: "0")
+        width.frame = NSRect(x: 90, y: 78, width: 70, height: 24)
+        height.frame = NSRect(x: 90, y: 48, width: 70, height: 24)
+        skewX.frame = NSRect(x: 230, y: 78, width: 70, height: 24)
+        skewY.frame = NSRect(x: 230, y: 48, width: 70, height: 24)
+        let labels = [("水平 (%)", NSRect(x: 0, y: 82, width: 84, height: 18)),
+                      ("垂直 (%)", NSRect(x: 0, y: 52, width: 84, height: 18)),
+                      ("水平扭曲", NSRect(x: 170, y: 82, width: 58, height: 18)),
+                      ("垂直扭曲", NSRect(x: 170, y: 52, width: 58, height: 18))]
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 310, height: 112))
+        for (title, frame) in labels {
+            let label = NSTextField(labelWithString: title)
+            label.frame = frame
+            container.addSubview(label)
+        }
+        for field in [width, height, skewX, skewY] { container.addSubview(field) }
+        guard modal("延展/扭曲", "延展以百分比計算，扭曲以度計算。", container) else { return }
+        let newWidth = Int((Double(doc.width) * width.doubleValue / 100).rounded())
+        let newHeight = Int((Double(doc.height) * height.doubleValue / 100).rounded())
+        guard newWidth > 0, newHeight > 0, newWidth <= 8192, newHeight <= 8192,
+              newWidth * newHeight <= 24_000_000 else {
+            showError(PaintError.message("請輸入有效尺寸。")); return
+        }
+        doc.checkpoint()
+        for index in doc.layers.indices {
+            var raster = doc.layers[index].raster.resized(newWidth, newHeight, scale: true)
+            raster = raster.skewed(horizontal: skewX.doubleValue, vertical: skewY.doubleValue)
+            doc.layers[index].raster = raster
+        }
+        canvas.selection = nil
+        update()
+    }
+
+    func flipRotateDialog() {
+        canvas.finishText()
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 26))
+        popup.addItems(withTitles: ["水平翻轉", "垂直翻轉", "向右旋轉 90°", "旋轉 180°", "向左旋轉 90°"])
+        guard modal("翻轉/旋轉", "選擇要套用到整個影像的方向。", popup) else { return }
+        let selected = popup.indexOfSelectedItem
+        switch selected {
+        case 0: transform("horizontal")
+        case 1: transform("vertical")
+        case 2: transform("rotate")
+        case 3: transform("rotate"); transform("rotate")
+        default:
+            transform("rotate"); transform("rotate"); transform("rotate")
+        }
+    }
+
+    func attributesDialog() {
+        canvas.finishText()
+        let units = NSPopUpButton(frame: NSRect(x: 70, y: 78, width: 120, height: 26))
+        units.addItems(withTitles: ["像素", "英吋", "公分"])
+        let width = NSTextField(string: String(doc.width))
+        let height = NSTextField(string: String(doc.height))
+        width.frame = NSRect(x: 70, y: 46, width: 80, height: 24)
+        height.frame = NSRect(x: 70, y: 16, width: 80, height: 24)
+        let mono = NSButton(checkboxWithTitle: "黑白", target: nil, action: nil)
+        mono.frame = NSRect(x: 170, y: 46, width: 80, height: 20)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 110))
+        for (title, frame) in [("單位", NSRect(x: 8, y: 82, width: 50, height: 18)),
+                               ("寬度", NSRect(x: 8, y: 50, width: 50, height: 18)),
+                               ("高度", NSRect(x: 8, y: 20, width: 50, height: 18))] {
+            let label = NSTextField(labelWithString: title)
+            label.frame = frame
+            container.addSubview(label)
+        }
+        for view in [units, width, height, mono] { container.addSubview(view) }
+        guard modal("屬性", "變更畫布大小。不會縮放既有內容。96 DPI。", container) else { return }
+        let factor = units.indexOfSelectedItem == 1 ? 96.0 : units.indexOfSelectedItem == 2 ? 96.0 / 2.54 : 1
+        let newWidth = Int((width.doubleValue * factor).rounded())
+        let newHeight = Int((height.doubleValue * factor).rounded())
+        guard newWidth > 0, newHeight > 0, newWidth <= 8192, newHeight <= 8192,
+              newWidth * newHeight <= 24_000_000 else {
+            showError(PaintError.message("請輸入有效尺寸。")); return
+        }
+        doc.checkpoint()
+        for index in doc.layers.indices {
+            var raster = doc.layers[index].raster.resized(newWidth, newHeight, scale: false)
+            if mono.state == .on { raster = raster.grayscale() }
+            doc.layers[index].raster = raster
+        }
+        canvas.selection = nil
+        update()
+    }
+
+    func invertColors() {
+        canvas.finishText()
+        doc.checkpoint()
+        doc.layers[doc.active].raster = doc.layers[doc.active].raster.inverted()
+        update()
+    }
+
+    func clearImage() {
+        canvas.finishText()
+        doc.checkpoint()
+        doc.layers[doc.active].raster = Raster(doc.width, doc.height, white: true)
+        canvas.selection = nil
+        update()
+    }
+
+    func modal(_ title: String, _ info: String, _ view: NSView) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = info
+        alert.accessoryView = view
+        alert.addButton(withTitle: "確定")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    func toggleRulers() { showRulers.toggle(); layoutChrome() }
+    func toggleStatusBar() { showStatus.toggle(); layoutChrome() }
+    func toggleThumbnail() { showThumbnail.toggle(); update(); layoutChrome() }
+    func toggleToolbox() { showToolbox.toggle(); layoutChrome() }
+    func togglePalette() { showPalette.toggle(); layoutChrome() }
+    func toggleTextBar() { showTextBar.toggle(); layoutChrome() }
+    func toggleBitmapView() { viewingBitmap = true; layoutChrome() }
+
+    func customZoom() {
+        let field = NSTextField(string: "\(Int((canvas.zoom * 100).rounded()))")
+        field.frame = NSRect(x: 0, y: 0, width: 120, height: 24)
+        guard modal("自訂縮放", "輸入 10 到 800 的百分比。", field) else { return }
+        setZoom(CGFloat(field.integerValue) / 100)
+    }
+
+    func helpTopic() {
+        let alert = NSAlert()
+        alert.messageText = "說明主題"
+        alert.informativeText = "如需說明，請按一下「說明」功能表中的「說明主題」。\n\n左側工具箱由上到下是選取、橡皮擦、填色、放大鏡、鉛筆、筆刷、噴槍、文字與圖形。工具選項框會跟著目前工具改變。底部調色盤以滑鼠左鍵選前景色、右鍵選背景色，點兩下可編輯色彩。"
+        alert.addButton(withTitle: "確定")
+        alert.runModal()
+    }
+
+    func unavailableAI(_ name: String) {
+        let alert = NSAlert()
+        alert.messageText = name
+        alert.informativeText = "這是 Microsoft 的雲端或 NPU 功能，這個 Mac 版本沒有代為連線。本機可用的是「移除背景」。"
+        alert.addButton(withTitle: "確定")
+        alert.runModal()
+    }
+
+    func rememberRecent(_ url: URL) {
+        var list = UserDefaults.standard.stringArray(forKey: "paint.recent") ?? []
+        list.removeAll { $0 == url.path }
+        list.insert(url.path, at: 0)
+        UserDefaults.standard.set(Array(list.prefix(4)), forKey: "paint.recent")
+    }
+
+    func setWallpaper(_ scaling: NSImageScaling) {
+        let alert = NSAlert()
+        alert.messageText = "設定成桌布"
+        alert.informativeText = "要將目前影像設為這台 Mac 的桌面背景嗎？"
+        alert.addButton(withTitle: "設定")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn, let screen = NSScreen.main else { return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("paint-wallpaper.png")
+        do {
+            try doc.composite().write(url)
+            try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [.imageScaling: scaling.rawValue])
+        } catch { showError(error) }
+    }
+
+    func copyToFile() {
+        canvas.finishText()
+        let panel = NSSavePanel()
+        panel.title = "複製到"
+        panel.nameFieldStringValue = "選取.png"
+        panel.allowedContentTypes = [.png]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let raster = doc.layers[doc.active].raster.cropped(canvas.selection ?? CGRect(x: 0, y: 0, width: doc.width, height: doc.height))
+        do { try raster.write(url) } catch { showError(error) }
+    }
+
+    func pasteFromFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .bmp, .tiff, .gif]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let raster = try Raster.load(url)
+            let image = NSImage(cgImage: raster.image, size: NSSize(width: raster.width, height: raster.height))
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([image])
+            pasteAction(nil)
+        } catch { showError(error) }
+    }
+
+    func pickBackdrop() {
+        pickingBackdrop = true
+        let panel = NSColorPanel.shared
+        panel.setTarget(self)
+        panel.setAction(#selector(colorPanelChanged))
+        panel.color = canvas.backdrop ?? .white
+        panel.makeKeyAndOrderFront(nil)
     }
 
     func transform(_ kind: String) {

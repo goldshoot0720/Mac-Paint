@@ -103,6 +103,10 @@ moveCanvas.mouseDragged(with:mouse(.leftMouseDragged,40,40))
 moveCanvas.cancelGesture()
 check(moveDoc.layers[0].raster.pixels == beforeMove.layers[0].raster.pixels && moveDoc.revision == beforeMove.revision,"cancel selection move restores pixels and saved state")
 check(moveDoc.undoStack.isEmpty && moveDoc.redoStack.count == redoCount,"cancel drag preserves undo and redo history")
+var red = Raster(1,1); red.pixels = [255,0,0,255]
+check(Array(red.inverted().pixels[0..<4]) == [0,255,255,255],"invert swaps an opaque color")
+check(red.inverted().inverted().pixels == red.pixels,"invert round trip")
+check(r.skewed(horizontal:0,vertical:0).pixels == r.pixels,"zero skew keeps the raster")
 moveCanvas.tool = .brush
 moveCanvas.mouseDown(with:mouse(.leftMouseDown,20,20))
 moveCanvas.mouseDragged(with:mouse(.leftMouseDragged,40,40))

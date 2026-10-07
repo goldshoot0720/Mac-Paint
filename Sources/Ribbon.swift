@@ -4,6 +4,8 @@ import AppKit
 
 final class LayoutView: NSView {
     var background: NSColor?
+    var gradientTop: NSColor?
+    var gradientBottom: NSColor?
     var onLayout: (() -> Void)?
     override var isFlipped: Bool { true }
     override func layout() {
@@ -11,6 +13,10 @@ final class LayoutView: NSView {
         onLayout?()
     }
     override func draw(_ dirtyRect: NSRect) {
+        if let gradientTop, let gradientBottom {
+            Fluent.gradient(bounds, gradientTop, gradientBottom)
+            return
+        }
         guard let background else { return }
         background.setFill()
         bounds.fill()
@@ -89,6 +95,8 @@ final class ColorGroup: NSView {
     private(set) var recent: [ColorDot] = []
     private var swatches: [ColorDot] = []
     let editButton = RibbonButton(nil, kind: .grid, width: 36, height: 36)
+    var showsRecent = true
+    var showsEditorWheel = true
     var onPick: ((NSColor, Bool) -> Void)?
     var onSelectWell: ((Bool) -> Void)?
 
@@ -157,8 +165,10 @@ final class ColorGroup: NSView {
             dot.setFrameOrigin(NSPoint(x: gridX + CGFloat(column) * step, y: 3 + CGFloat(row) * step))
         }
         for (index, dot) in recent.enumerated() {
+            dot.isHidden = !showsRecent
             dot.setFrameOrigin(NSPoint(x: gridX + CGFloat(index) * step, y: 3 + 2 * step))
         }
+        editButton.glyph = showsEditorWheel ? nil : .plus
         editButton.setFrameOrigin(NSPoint(x: gridX + 10 * step + 6, y: 16))
     }
 
@@ -186,6 +196,7 @@ final class ColorGroup: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        guard showsEditorWheel else { return }
         let wheel = NSRect(x: editButton.frame.minX + 4, y: editButton.frame.minY + 4,
                            width: 24, height: 24)
         draw(wheelIn: wheel)
@@ -308,5 +319,142 @@ final class StatusBarView: NSView {
         segment(.cursor, cursorText)
         segment(.marquee, selectionText)
         segment(.canvasSize, canvasText)
+    }
+}
+
+// Font, size and style controls shared by the Windows 11 text strip,
+// the Windows 7 / 10 contextual Text tab, and the Windows XP text toolbar.
+final class TextFormatBar: NSView {
+    var fontName = "Helvetica" { didSet { fontButton.caption = fontName; fontButton.needsDisplay = true } }
+    var fontSize: CGFloat = 28 { didSet { sizeButton.caption = "\(Int(fontSize))"; sizeButton.needsDisplay = true } }
+    var bold = false { didSet { boldButton.isChecked = bold } }
+    var italic = false { didSet { italicButton.isChecked = italic } }
+    var underline = false { didSet { underlineButton.isChecked = underline } }
+    var onFont: ((String) -> Void)?
+    var onSize: ((CGFloat) -> Void)?
+    var onToggle: ((String) -> Void)?
+
+    private let fontButton = RibbonButton(nil, caption: "Helvetica", kind: .text, chevron: true, width: 168, height: 26)
+    private let sizeButton = RibbonButton(nil, caption: "28", kind: .text, chevron: true, width: 64, height: 26)
+    private let boldButton = RibbonButton(nil, caption: "粗體", kind: .text, width: 52, height: 26)
+    private let italicButton = RibbonButton(nil, caption: "斜體", kind: .text, width: 52, height: 26)
+    private let underlineButton = RibbonButton(nil, caption: "底線", kind: .text, width: 52, height: 26)
+
+    static let faces = ["微軟正黑體", "Microsoft JhengHei", "PingFang TC", "Tahoma", "Segoe UI",
+                        "Arial", "Times New Roman", "Courier New", "標楷體", "Helvetica"]
+    static let sizes: [CGFloat] = [8, 10, 12, 14, 18, 24, 28, 36, 48, 72]
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        fontButton.menuBuilder = { [weak self] in self?.fontMenu() ?? NSMenu() }
+        sizeButton.menuBuilder = { [weak self] in self?.sizeMenu() ?? NSMenu() }
+        boldButton.onClick = { [weak self] in self?.onToggle?("bold") }
+        italicButton.onClick = { [weak self] in self?.onToggle?("italic") }
+        underlineButton.onClick = { [weak self] in self?.onToggle?("underline") }
+        for button in [fontButton, sizeButton, boldButton, italicButton, underlineButton] { addSubview(button) }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func sync(name: String, size: CGFloat, bold: Bool, italic: Bool, underline: Bool) {
+        fontName = name; fontSize = size; self.bold = bold; self.italic = italic; self.underline = underline
+    }
+
+    override func layout() {
+        super.layout()
+        var x: CGFloat = 8
+        for button in [fontButton, sizeButton, boldButton, italicButton, underlineButton] {
+            button.setFrameOrigin(NSPoint(x: x, y: (bounds.height - button.frame.height) / 2))
+            x += button.frame.width + 6
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Fluent.chrome.setFill()
+        bounds.fill()
+        Fluent.chromeBorder.setFill()
+        NSRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
+    }
+
+    private func fontMenu() -> NSMenu {
+        let menu = NSMenu()
+        let installed = Set(NSFontManager.shared.availableFontFamilies)
+        let names = TextFormatBar.faces.filter { installed.contains($0) || $0 == fontName }
+        for name in names.isEmpty ? [fontName] : names {
+            let entry = BlockMenuItem(title: name) { [weak self] in self?.onFont?(name) }
+            entry.state = name == fontName ? .on : .off
+            menu.addItem(entry)
+        }
+        return menu
+    }
+
+    private func sizeMenu() -> NSMenu {
+        let menu = NSMenu()
+        for size in TextFormatBar.sizes {
+            let entry = BlockMenuItem(title: "\(Int(size))") { [weak self] in self?.onSize?(size) }
+            entry.state = Int(fontSize) == Int(size) ? .on : .off
+            menu.addItem(entry)
+        }
+        return menu
+    }
+}
+
+final class RulerView: NSView {
+    var horizontal = true
+    var scale: CGFloat = 1
+    var origin: CGFloat = 0
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Fluent.color(0xF4F4F4).setFill()
+        bounds.fill()
+        Fluent.chromeBorder.setFill()
+        if horizontal {
+            NSRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
+        } else {
+            NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height).fill()
+        }
+        let step: CGFloat = scale >= 2 ? 50 : 100
+        Fluent.inkSoft.setFill()
+        let font = Fluent.ui(9)
+        if horizontal {
+            var value = ceil(origin / step) * step
+            while value < origin + bounds.width / max(scale, 0.01) {
+                let x = (value - origin) * scale
+                NSRect(x: x, y: bounds.height - 6, width: 1, height: 6).fill()
+                Fluent.text("\(Int(value))", in: NSRect(x: x + 2, y: 0, width: 36, height: bounds.height - 6),
+                            font: font, color: Fluent.inkSoft, alignment: .left)
+                value += step
+            }
+        } else {
+            var value = ceil(origin / step) * step
+            while value < origin + bounds.height / max(scale, 0.01) {
+                let y = (value - origin) * scale
+                NSRect(x: bounds.width - 6, y: y, width: 6, height: 1).fill()
+                value += step
+            }
+        }
+    }
+}
+
+final class ThumbnailView: NSView {
+    var image: NSImage? { didSet { needsDisplay = true } }
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        Fluent.chrome.setFill()
+        bounds.fill()
+        Fluent.stroke(bounds, radius: 0, color: Fluent.chromeBorder)
+        let caption = NSRect(x: 6, y: 2, width: bounds.width - 12, height: 16)
+        Fluent.text("縮圖", in: caption, font: Fluent.ui(11), color: Fluent.ink, alignment: .left)
+        let preview = bounds.insetBy(dx: 6, dy: 8)
+        let picture = NSRect(x: preview.minX, y: preview.minY + 12, width: preview.width, height: preview.height - 12)
+        NSColor.white.setFill()
+        picture.fill()
+        image?.draw(in: picture, from: .zero, operation: .sourceOver, fraction: 1,
+                    respectFlipped: true, hints: [.interpolation: NSImageInterpolation.medium.rawValue])
+        Fluent.fieldBorder.setStroke()
+        NSBezierPath(rect: picture).stroke()
     }
 }

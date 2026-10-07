@@ -111,8 +111,20 @@ final class CanvasView: NSView {
     var fontName = "Helvetica" { didSet { updateTextStyle() } }
     var fontSize: CGFloat = 28 { didSet { updateTextStyle() } }
     var boldText = false { didSet { updateTextStyle() } }
+    var italicText = false { didSet { updateTextStyle() } }
+    var underlineText = false { didSet { updateTextStyle() } }
     var zoom: CGFloat = 1
     var grid = false
+    var freeSelect = false
+    var drawOpaque = true
+    var brushTip = -1
+    var backdrop: NSColor?
+    var pointer: ((Int, Int) -> Void)?
+    var pointerExited: (() -> Void)?
+    var textChromeChanged: (() -> Void)?
+    var consumeClick: (() -> Bool)?
+    var selectionMask: Raster?
+    var lassoOutline: [CGPoint] = []
     var textAnchor: CGPoint? { didSet { needsDisplay = true } }
     var selection: CGRect?
     var changed: (() -> Void)?
@@ -142,12 +154,24 @@ final class CanvasView: NSView {
         cached = NSImage(cgImage:doc.composite().image,size:NSSize(width:doc.width,height:doc.height))
         setFrameSize(NSSize(width:CGFloat(doc.width)*zoom,height:CGFloat(doc.height)*zoom)); layoutTextEditor(); needsDisplay = true
     }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    override func mouseMoved(with event: NSEvent) {
+        let p = point(event); pointer?(Int(p.x), Int(p.y))
+    }
+    override func mouseExited(with event: NSEvent) { pointerExited?() }
     override func draw(_ dirtyRect:NSRect) {
-        NSColor.white.setFill(); bounds.fill()
-        let tile: CGFloat = 12
-        NSColor(calibratedWhite:0.90,alpha:1).setFill()
         let area = dirtyRect.intersection(bounds)
-        if !area.isEmpty { for y in Int(area.minY/tile)...Int(area.maxY/tile) { for x in Int(area.minX/tile)...Int(area.maxX/tile) where (x+y)%2 == 0 { NSRect(x:CGFloat(x)*tile,y:CGFloat(y)*tile,width:tile,height:tile).fill() } } }
+        if let backdrop { backdrop.setFill(); bounds.fill() }
+        else {
+            NSColor.white.setFill(); bounds.fill()
+            let tile: CGFloat = 12
+            NSColor(calibratedWhite:0.90,alpha:1).setFill()
+            if !area.isEmpty { for y in Int(area.minY/tile)...Int(area.maxY/tile) { for x in Int(area.minX/tile)...Int(area.maxX/tile) where (x+y)%2 == 0 { NSRect(x:CGFloat(x)*tile,y:CGFloat(y)*tile,width:tile,height:tile).fill() } } }
+        }
         cached?.draw(in:bounds,from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:[.interpolation:NSImageInterpolation.none.rawValue])
         if let float = floating, let rect = selection {
             NSImage(cgImage:float.image,size:rect.size).draw(in:scaled(rect),from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
@@ -170,6 +194,15 @@ final class CanvasView: NSView {
             marker.move(to:NSPoint(x:x-5,y:y)); marker.line(to:NSPoint(x:x+5,y:y))
             NSColor.systemBlue.setStroke(); marker.lineWidth = 2; marker.stroke()
         }
+        if lassoOutline.count > 1 {
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: lassoOutline[0].x * zoom, y: lassoOutline[0].y * zoom))
+            for point in lassoOutline.dropFirst() { path.line(to: NSPoint(x: point.x * zoom, y: point.y * zoom)) }
+            path.close()
+            path.lineWidth = 1
+            NSColor.white.setStroke(); path.stroke()
+            NSColor.black.setStroke(); path.setLineDash([4, 4], count: 2, phase: 0); path.stroke()
+        }
         if let r = selection {
             let path = NSBezierPath(rect:scaled(r)); path.lineWidth = 1
             NSColor.white.setStroke(); path.stroke(); NSColor.black.setStroke(); path.setLineDash([4,4],count:2,phase:0); path.stroke()
@@ -184,6 +217,7 @@ final class CanvasView: NSView {
     override func mouseDown(with event:NSEvent) { begin(event, color:primary) }
     override func rightMouseDown(with event:NSEvent) { begin(event,color:secondary) }
     func begin(_ event:NSEvent,color:NSColor) {
+        if consumeClick?() == true { return }
         if textEditor != nil { finishText(); return }
         window?.makeFirstResponder(self)
         guard doc.layers[doc.active].visible else { status?("請先顯示目前圖層，再進行編輯。"); NSSound.beep(); return }
@@ -221,8 +255,11 @@ final class CanvasView: NSView {
         if tool == .select {
             if let rect = selection, rect.contains(start) {
                 moving = true; initialSelection = rect; floating = doc.layers[doc.active].raster.cropped(rect)
-                doc.checkpoint(); doc.layers[doc.active].raster.clear(rect); refresh()
-            } else { selection = nil; moving = false }
+                initialOutline = lassoOutline
+                doc.checkpoint(); doc.layers[doc.active].raster.clear(rect, mask: selectionMask); refresh()
+            } else if freeSelect {
+                selection = nil; selectionMask = nil; lassoOutline = []; moving = false; lasso = [start]
+            } else { selection = nil; selectionMask = nil; lassoOutline = []; moving = false }
             drawing = true; return
         }
         selection = nil; doc.checkpoint(); drawing = true
@@ -256,8 +293,13 @@ final class CanvasView: NSView {
             return
         }
         if tool == .select {
-            if moving, let r = initialSelection { selection = r.offsetBy(dx:(p.x-start.x).rounded(),dy:(p.y-start.y).rounded()) }
-            else { selection = rect(start,p).integral.intersection(CGRect(x:0,y:0,width:doc.width,height:doc.height)) }
+            if moving, let r = initialSelection {
+                let dx = (p.x-start.x).rounded(), dy = (p.y-start.y).rounded()
+                selection = r.offsetBy(dx:dx, dy:dy)
+                if !initialOutline.isEmpty { lassoOutline = initialOutline.map { CGPoint(x: $0.x + dx, y: $0.y + dy) } }
+            } else if freeSelect {
+                lasso.append(p); lassoOutline = lasso
+            } else { selection = rect(start,p).integral.intersection(CGRect(x:0,y:0,width:doc.width,height:doc.height)); selectionMask = nil; lassoOutline = [] }
         } else if tool.isStroke { stroke(from:last,to:p) }
         else if tool.isShape {
             if event.modifierFlags.contains(.shift) {
@@ -268,6 +310,7 @@ final class CanvasView: NSView {
         }
         last = p; refresh()
         status?("\(Int(p.x)), \(Int(p.y)) 像素")
+        pointer?(Int(p.x), Int(p.y))
     }
     override func mouseUp(with event:NSEvent) { end(event) }
     override func rightMouseUp(with event:NSEvent) { end(event) }
@@ -303,7 +346,11 @@ final class CanvasView: NSView {
             let box = proposed.width >= 8 && proposed.height >= 8 ? proposed : CGRect(x:start.x,y:start.y,width:320,height:max(100,fontSize*3))
             textAnchor = nil; pendingTextRect = nil; beginText(in:box); return
         }
-        if moving, let floating, let selection { doc.layers[doc.active].raster.paste(floating,at:selection.origin) }
+        if tool == .select && freeSelect && !moving { commitLasso(); return }
+        if moving, let floating, let selection {
+            let skip = drawOpaque ? nil : secondary.rgba
+            doc.layers[doc.active].raster.paste(floating, at: selection.origin, mask: selectionMask, skip: skip)
+        }
         floating = nil; moving = false; drawing = false; base = nil; clearGesture()
         if let r = selection, r.width < 1 || r.height < 1 { selection = nil }
         refresh(); changed?()
@@ -319,6 +366,11 @@ final class CanvasView: NSView {
             if currentTool == .eraser { ctx.setBlendMode(.clear); ctx.setAlpha(1) }
             if currentTool == .calligraphy { ctx.setLineCap(.square); ctx.setLineWidth(width*1.3) }
             if currentTool == .marker { ctx.setAlpha(0.18*alpha); ctx.setLineWidth(width*3) }
+            if currentTool == .brush && brushTip >= 0 {
+                let column = brushTip % 4
+                if column == 1 { ctx.setLineCap(.butt) }
+                if column >= 2 { ctx.setLineWidth(max(2, width / 3)); ctx.setLineCap(.square) }
+            }
             if currentTool == .spray {
                 for _ in 0..<max(12,Int(width)*2) {
                     let theta = CGFloat.random(in:0...(.pi*2)), r = CGFloat.random(in:0...1).squareRoot()*width*2
@@ -450,6 +502,7 @@ final class CanvasView: NSView {
         textHost = host; textEditor = editor; layoutTextEditor(); updateTextStyle()
         window?.makeFirstResponder(editor); needsDisplay = true
         status?("直接輸入文字 · Enter 換行 · 點框外或 ⌘Enter 完成 · Esc 取消")
+        textChromeChanged?()
     }
     func layoutTextEditor() {
         guard let r = textRect, let host = textHost else { return }
@@ -458,8 +511,24 @@ final class CanvasView: NSView {
     func updateTextStyle() {
         guard let editor = textEditor else { return }
         let base = NSFont(name:fontName,size:fontSize) ?? .systemFont(ofSize:fontSize)
-        editor.font = boldText ? NSFontManager.shared.convert(base,toHaveTrait:.boldFontMask) : base
+        var traits = NSFontTraitMask()
+        if boldText { traits.insert(.boldFontMask) }
+        if italicText { traits.insert(.italicFontMask) }
+        let font = traits.isEmpty ? base : NSFontManager.shared.convert(base, toHaveTrait: traits)
+        editor.font = font
         editor.textColor = primary; editor.insertionPointColor = primary
+        let underline = underlineText ? NSUnderlineStyle.single.rawValue : 0
+        var typing = editor.typingAttributes
+        typing[.font] = font
+        typing[.foregroundColor] = primary
+        typing[.underlineStyle] = underline
+        editor.typingAttributes = typing
+        if editor.string.isEmpty == false {
+            editor.textStorage?.beginEditing()
+            editor.textStorage?.setAttributes([.font: font, .foregroundColor: primary, .underlineStyle: underline],
+                                             range: NSRange(location: 0, length: (editor.string as NSString).length))
+            editor.textStorage?.endEditing()
+        }
     }
     func finishText(commit: Bool = true) {
         guard let editor = textEditor, let r = textRect else { return }
@@ -489,6 +558,7 @@ final class CanvasView: NSView {
         textHost?.removeFromSuperview(); textHost = nil
         window?.makeFirstResponder(self); refresh(); changed?()
         status?("文字 · 點選位置或拖出文字框")
+        textChromeChanged?()
     }
     func addText(_ text:String,at p:CGPoint) {
         guard !text.isEmpty else { return }; doc.checkpoint()
@@ -515,7 +585,8 @@ final class CanvasView: NSView {
         }
         clearGesture(); drawing = false; moving = false; floating = nil; base = nil
         curveStage = 0; polygonPoints = []
-        initialSelection = nil; textAnchor = nil; pendingTextRect = nil; selection = nil
+        initialSelection = nil; initialOutline = []; lasso = []
+        textAnchor = nil; pendingTextRect = nil; selection = nil
         refresh(); changed?()
     }
     override func keyDown(with event:NSEvent) {
@@ -524,6 +595,43 @@ final class CanvasView: NSView {
         super.keyDown(with:event)
     }
     func deleteSelection() {
-        guard let r = selection else { return }; doc.checkpoint(); doc.layers[doc.active].raster.clear(r); selection = nil; refresh(); changed?()
+        guard let r = selection else { return }
+        doc.checkpoint(); doc.layers[doc.active].raster.clear(r, mask: selectionMask)
+        selection = nil; selectionMask = nil; lassoOutline = []; refresh(); changed?()
+    }
+    func selectAll() {
+        selection = CGRect(x: 0, y: 0, width: doc.width, height: doc.height)
+        selectionMask = nil; lassoOutline = []; freeSelect = false; needsDisplay = true
+    }
+    func invertSelection() {
+        let full = CGRect(x: 0, y: 0, width: doc.width, height: doc.height)
+        guard let current = selection else { selectAll(); return }
+        var mask = Raster(doc.width, doc.height, white: true)
+        mask.clear(current, mask: selectionMask)
+        selection = full; selectionMask = mask; lassoOutline = []; needsDisplay = true
+    }
+    private var lasso: [CGPoint] = []
+    private var initialOutline: [CGPoint] = []
+    private func commitLasso() {
+        drawing = false
+        let points = lasso
+        lasso = []
+        guard points.count >= 3 else { lassoOutline = []; selection = nil; selectionMask = nil; refresh(); return }
+        let minX = points.map(\.x).min() ?? 0, minY = points.map(\.y).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0, maxY = points.map(\.y).max() ?? 0
+        var box = CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY)).integral
+        box = box.intersection(CGRect(x: 0, y: 0, width: doc.width, height: doc.height))
+        guard box.width >= 1, box.height >= 1 else { selection = nil; refresh(); return }
+        var mask = Raster(Int(box.width), Int(box.height))
+        let shifted = points.map { CGPoint(x: $0.x - box.minX, y: $0.y - box.minY) }
+        mask.drawTopLeft { ctx in
+            ctx.beginPath()
+            ctx.move(to: shifted[0])
+            for point in shifted.dropFirst() { ctx.addLine(to: point) }
+            ctx.closePath()
+            ctx.setFillColor(NSColor.black.cgColor)
+            ctx.fillPath()
+        }
+        selection = box; selectionMask = mask; lassoOutline = points; refresh(); changed?()
     }
 }

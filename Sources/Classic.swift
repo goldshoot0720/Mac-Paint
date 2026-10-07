@@ -8,10 +8,11 @@ import AppKit
 final class TabStrip: NSView {
     var tabs: [String] = ["常用", "檢視"]
     var activeIndex = 0
+    var paintButton = false
     var onSelect: ((Int) -> Void)?
     var onFile: (() -> Void)?
     private var hoverIndex = -1
-    private let fileWidth: CGFloat = 54
+    private var fileWidth: CGFloat { paintButton ? 46 : 54 }
     private let tabWidth: CGFloat = 62
 
     override var isFlipped: Bool { true }
@@ -44,12 +45,23 @@ final class TabStrip: NSView {
         // File tab.
         let file = NSRect(x: 0, y: 0, width: fileWidth, height: bounds.height)
         tokens.fileTab.setFill()
-        if Fluent.skin == .win7 {
+        if paintButton {
+            let button = file.insetBy(dx: 4, dy: 3)
+            NSBezierPath(roundedRect: button, xRadius: 3, yRadius: 3).fill()
+            let mark = NSRect(x: button.midX - 8, y: button.midY - 7, width: 16, height: 14)
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: NSRect(x: mark.minX, y: mark.minY + 2, width: 8, height: 8)).fill()
+            NSColor(srgbRed: 0.95, green: 0.75, blue: 0.2, alpha: 1).setFill()
+            NSBezierPath(ovalIn: NSRect(x: mark.midX - 2, y: mark.minY, width: 7, height: 7)).fill()
+            NSColor(srgbRed: 0.35, green: 0.7, blue: 0.95, alpha: 1).setFill()
+            NSBezierPath(ovalIn: NSRect(x: mark.maxX - 7, y: mark.maxY - 8, width: 6, height: 6)).fill()
+        } else if Fluent.skin == .win7 {
             NSBezierPath(roundedRect: file.insetBy(dx: 2, dy: 2), xRadius: 3, yRadius: 3).fill()
+            Fluent.text("檔案", in: file, font: Fluent.ui(13), color: .white)
         } else {
             file.fill()
+            Fluent.text("檔案", in: file, font: Fluent.ui(13), color: .white)
         }
-        Fluent.text("檔案", in: file, font: Fluent.ui(13), color: .white)
         // Regular tabs.
         for (index, title) in tabs.enumerated() {
             let rect = NSRect(x: fileWidth + CGFloat(index) * tabWidth, y: 0,
@@ -83,15 +95,24 @@ final class TabStrip: NSView {
 
 final class ToolboxView: NSView {
     private(set) var buttons: [PaintTool: RibbonButton] = [:]
-    var onSelect: ((PaintTool) -> Void)?
+    private let freeButton: RibbonButton
+    var onSelect: ((PaintTool, Bool) -> Void)?
     var onWidth: ((CGFloat) -> Void)?
+    var onZoom: ((CGFloat) -> Void)?
+    var onShapeStyle: ((Int) -> Void)?
+    var onTransparent: ((Bool) -> Void)?
+    var onBrushTip: ((Int, CGFloat) -> Void)?
     var activeTool: PaintTool = .pencil { didSet { needsDisplay = true } }
+    var freeActive = false { didSet { needsDisplay = true } }
     var activeWidth: CGFloat = 3 { didSet { needsDisplay = true } }
+    var shapeStyle = 0 { didSet { needsDisplay = true } }
+    var transparent = false { didSet { needsDisplay = true } }
+    var brushTip = 0 { didSet { needsDisplay = true } }
+    var zoomLevel: CGFloat = 1 { didSet { needsDisplay = true } }
 
-    // Classic Paint toolbox order. The first slot is free-form select, which
-    // this build does not implement, so it is shown disabled.
-    static let slots: [PaintTool?] = [
-        nil, .select,
+    // Classic Paint toolbox order, including free-form select.
+    static let slots: [PaintTool] = [
+        .select, .select,
         .eraser, .fill,
         .picker, .magnifier,
         .pencil, .brush,
@@ -100,28 +121,30 @@ final class ToolboxView: NSView {
         .rectangle, .polygon,
         .ellipse, .rounded
     ]
-    static let widths: [CGFloat] = [1, 2, 3, 5, 8]
     static let cell = NSSize(width: 25, height: 24)
     static let preferredWidth: CGFloat = 56
     static var gridHeight: CGFloat { cell.height * 8 + 4 }
 
+    private enum OptionKind {
+        case none, widths, eraser, spray, zoom, shapes, transparency, tips
+    }
+
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
+        freeButton = RibbonButton(.freeSelect, kind: .grid,
+                                  width: ToolboxView.cell.width, height: ToolboxView.cell.height)
         super.init(frame: frameRect)
-        let disabled = RibbonButton(.freeSelect, kind: .grid,
-                                    width: ToolboxView.cell.width, height: ToolboxView.cell.height)
-        disabled.glyphSize = 16
-        disabled.isEnabledControl = false
-        disabled.toolTip = "任意選取（此版本尚未實作）"
-        addSubview(disabled)
-        for slot in ToolboxView.slots {
-            guard let tool = slot else { continue }
+        freeButton.glyphSize = 16
+        freeButton.toolTip = "任意選取"
+        freeButton.onClick = { [weak self] in self?.onSelect?(.select, true) }
+        addSubview(freeButton)
+        for tool in Set(ToolboxView.slots) {
             let button = RibbonButton(tool.glyph, kind: .grid,
                                       width: ToolboxView.cell.width, height: ToolboxView.cell.height)
             button.glyphSize = 16
             button.toolTip = tool.rawValue
-            button.onClick = { [weak self] in self?.onSelect?(tool) }
+            button.onClick = { [weak self] in self?.onSelect?(tool, false) }
             buttons[tool] = button
             addSubview(button)
         }
@@ -130,22 +153,26 @@ final class ToolboxView: NSView {
 
     override func layout() {
         super.layout()
-        var disabledPlaced = false
-        for (index, slot) in ToolboxView.slots.enumerated() {
+        var rectPlaced = false
+        for (index, tool) in ToolboxView.slots.enumerated() {
             let origin = NSPoint(x: 3 + CGFloat(index % 2) * ToolboxView.cell.width,
                                  y: 2 + CGFloat(index / 2) * ToolboxView.cell.height)
-            if let tool = slot {
-                buttons[tool]?.setFrameOrigin(origin)
-            } else if !disabledPlaced {
-                disabledPlaced = true
-                subviews.first?.setFrameOrigin(origin)
+            if index == 0 { freeButton.setFrameOrigin(origin); continue }
+            if tool == .select {
+                if rectPlaced { continue }
+                rectPlaced = true
             }
+            buttons[tool]?.setFrameOrigin(origin)
         }
     }
 
-    func select(_ tool: PaintTool) {
+    func select(_ tool: PaintTool, free: Bool) {
         activeTool = tool
-        for (candidate, button) in buttons { button.isChecked = candidate == tool }
+        freeActive = free && tool == .select
+        freeButton.isChecked = freeActive
+        for (candidate, button) in buttons {
+            button.isChecked = candidate == tool && !(candidate == .select && freeActive)
+        }
     }
 
     private var optionsRect: NSRect {
@@ -153,35 +180,166 @@ final class ToolboxView: NSView {
                width: ToolboxView.cell.width * 2, height: 74)
     }
 
+    private var optionKind: OptionKind {
+        switch activeTool {
+        case .select, .text: return .transparency
+        case .eraser: return .eraser
+        case .magnifier: return .zoom
+        case .brush: return .tips
+        case .spray: return .spray
+        case .line, .curve: return .widths
+        case .rectangle, .polygon, .ellipse, .rounded: return .shapes
+        default: return .none
+        }
+    }
+
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let box = optionsRect
-        guard activeTool.usesSize, box.contains(point) else { return }
-        let row = Int((point.y - box.minY - 4) / 14)
-        guard row >= 0, row < ToolboxView.widths.count else { return }
-        activeWidth = ToolboxView.widths[row]
-        onWidth?(activeWidth)
+        guard box.contains(point) else { return }
+        switch optionKind {
+        case .widths:
+            let widths: [CGFloat] = [1, 2, 3, 5, 8]
+            let row = Int((point.y - box.minY - 4) / 14)
+            guard widths.indices.contains(row) else { return }
+            activeWidth = widths[row]; onWidth?(activeWidth)
+        case .eraser:
+            let sizes: [CGFloat] = [4, 8, 12, 16]
+            let row = Int((point.y - box.minY - 6) / 16)
+            guard sizes.indices.contains(row) else { return }
+            activeWidth = sizes[row]; onWidth?(activeWidth)
+        case .spray:
+            let sizes: [CGFloat] = [4, 10, 18]
+            let row = Int((point.y - box.minY - 4) / 22)
+            guard sizes.indices.contains(row) else { return }
+            activeWidth = sizes[row]; onWidth?(activeWidth)
+        case .zoom:
+            let levels: [CGFloat] = [1, 2, 6, 8]
+            let column = point.x < box.midX ? 0 : 1
+            let row = point.y < box.midY ? 0 : 1
+            let level = levels[row * 2 + column]
+            zoomLevel = level; onZoom?(level)
+        case .shapes:
+            let row = Int((point.y - box.minY) / (box.height / 3))
+            let styles = [0, 2, 1]
+            guard styles.indices.contains(row) else { return }
+            shapeStyle = styles[row]; onShapeStyle?(shapeStyle)
+        case .transparency:
+            transparent = point.x >= box.midX
+            onTransparent?(transparent)
+        case .tips:
+            let column = min(3, max(0, Int((point.x - box.minX) / (box.width / 4))))
+            let row = min(2, max(0, Int((point.y - box.minY) / (box.height / 3))))
+            brushTip = row * 4 + column
+            let width: CGFloat = [3, 7, 12][row]
+            activeWidth = width
+            onBrushTip?(brushTip, width)
+        case .none:
+            break
+        }
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
         Fluent.chrome.setFill()
         bounds.fill()
         let box = optionsRect
-        guard activeTool.usesSize else { return }
         Fluent.color(0xFFFFFF).setFill()
         box.fill()
         Fluent.bevel(box, raised: false)
-        for (index, width) in ToolboxView.widths.enumerated() {
-            let row = NSRect(x: box.minX + 2, y: box.minY + 4 + CGFloat(index) * 14,
-                             width: box.width - 4, height: 13)
-            if abs(width - activeWidth) < 0.01 {
-                Fluent.color(0x316AC5).setFill()
-                row.fill()
-                NSColor.white.setFill()
-            } else {
-                NSColor.black.setFill()
+        switch optionKind {
+        case .none:
+            break
+        case .widths:
+            for (index, width) in [CGFloat(1), 2, 3, 5, 8].enumerated() {
+                let row = NSRect(x: box.minX + 2, y: box.minY + 4 + CGFloat(index) * 14, width: box.width - 4, height: 13)
+                let selected = abs(width - activeWidth) < 0.01
+                if selected { Fluent.color(0x316AC5).setFill(); row.fill() }
+                (selected ? NSColor.white : NSColor.black).setFill()
+                NSRect(x: row.minX + 5, y: row.midY - width / 2, width: row.width - 10, height: width).fill()
             }
-            NSRect(x: row.minX + 5, y: row.midY - width / 2, width: row.width - 10, height: width).fill()
+        case .eraser:
+            for (index, width) in [CGFloat(4), 8, 12, 16].enumerated() {
+                let row = NSRect(x: box.minX + 4, y: box.minY + 6 + CGFloat(index) * 16, width: box.width - 8, height: 15)
+                let selected = abs(width - activeWidth) < 0.01
+                if selected { Fluent.color(0x316AC5).setFill(); row.fill() }
+                (selected ? NSColor.white : NSColor.black).setFill()
+                let side = 3 + CGFloat(index) * 2
+                NSRect(x: row.midX - side / 2, y: row.midY - side / 2, width: side, height: side).fill()
+            }
+        case .spray:
+            for (index, width) in [CGFloat(4), 10, 18].enumerated() {
+                let row = NSRect(x: box.minX + 4, y: box.minY + 4 + CGFloat(index) * 22, width: box.width - 8, height: 20)
+                if abs(width - activeWidth) < 0.01 { Fluent.color(0x316AC5).setFill(); row.fill(); NSColor.white.setFill() }
+                else { NSColor.black.setFill() }
+                let dots = 3 + index * 3
+                for dot in 0..<dots {
+                    let angle = CGFloat(dot) / CGFloat(dots) * .pi * 2
+                    let radius = 2 + CGFloat(index) * 2
+                    NSBezierPath(ovalIn: NSRect(x: row.midX + cos(angle) * radius - 1, y: row.midY + sin(angle) * radius - 1, width: 2, height: 2)).fill()
+                }
+            }
+        case .zoom:
+            let levels = ["1x", "2x", "6x", "8x"]
+            let values: [CGFloat] = [1, 2, 6, 8]
+            for index in 0..<4 {
+                let rect = NSRect(x: box.minX + CGFloat(index % 2) * box.width / 2,
+                                  y: box.minY + CGFloat(index / 2) * box.height / 2,
+                                  width: box.width / 2, height: box.height / 2).insetBy(dx: 2, dy: 2)
+                if values[index] == zoomLevel { Fluent.color(0x316AC5).setFill(); rect.fill() }
+                Fluent.bevel(rect, raised: values[index] != zoomLevel, thin: true)
+                Fluent.text(levels[index], in: rect, font: Fluent.ui(11),
+                            color: values[index] == zoomLevel ? .white : .black)
+            }
+        case .shapes:
+            let styles = [0, 2, 1]
+            for (index, style) in styles.enumerated() {
+                let row = NSRect(x: box.minX + 3, y: box.minY + 3 + CGFloat(index) * (box.height - 6) / 3,
+                                 width: box.width - 6, height: (box.height - 6) / 3 - 2)
+                if style == shapeStyle { Fluent.color(0x316AC5).setFill(); row.fill() }
+                let mark = row.insetBy(dx: 8, dy: 3)
+                let ink: NSColor = style == shapeStyle ? .white : .black
+                if style != 1 {
+                    ink.setStroke()
+                    let path = NSBezierPath(rect: mark.insetBy(dx: 0.5, dy: 0.5))
+                    path.lineWidth = 1
+                    path.stroke()
+                }
+                if style != 0 {
+                    ink.setFill()
+                    mark.insetBy(dx: style == 1 ? 0 : 2, dy: style == 1 ? 0 : 2).fill()
+                }
+            }
+        case .transparency:
+            for (index, title) in ["不透明", "透明"].enumerated() {
+                let rect = NSRect(x: box.minX + CGFloat(index) * box.width / 2, y: box.minY,
+                                  width: box.width / 2, height: box.height).insetBy(dx: 3, dy: 8)
+                let selected = (index == 1) == transparent
+                if selected { Fluent.color(0x316AC5).setFill(); rect.fill() }
+                Fluent.bevel(rect, raised: !selected, thin: true)
+                Fluent.text(title, in: rect, font: Fluent.ui(10), color: selected ? .white : .black)
+            }
+        case .tips:
+            for index in 0..<12 {
+                let rect = NSRect(x: box.minX + CGFloat(index % 4) * box.width / 4,
+                                  y: box.minY + CGFloat(index / 4) * box.height / 3,
+                                  width: box.width / 4, height: box.height / 3)
+                if index == brushTip { Fluent.color(0x316AC5).setFill(); rect.fill() }
+                let ink: NSColor = index == brushTip ? .white : .black
+                ink.setFill()
+                let mark = rect.insetBy(dx: 4, dy: 4)
+                let column = index % 4
+                if column == 0 { NSBezierPath(ovalIn: mark).fill() }
+                else if column == 1 { mark.fill() }
+                else {
+                    ink.setStroke()
+                    let path = NSBezierPath()
+                    if column == 2 { path.move(to: NSPoint(x: mark.minX, y: mark.maxY)); path.line(to: NSPoint(x: mark.maxX, y: mark.minY)) }
+                    else { path.move(to: NSPoint(x: mark.minX, y: mark.minY)); path.line(to: NSPoint(x: mark.maxX, y: mark.maxY)) }
+                    path.lineWidth = 1 + CGFloat(index / 4)
+                    path.stroke()
+                }
+            }
         }
     }
 }

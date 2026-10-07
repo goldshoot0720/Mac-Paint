@@ -62,15 +62,30 @@ struct Raster {
         CGImageDestinationAddImage(destination, output.image, [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw PaintError.message("儲存失敗，請檢查目的資料夾。") }
     }
-    mutating func paste(_ source: Raster, at origin: CGPoint) {
+    mutating func paste(_ source: Raster, at origin: CGPoint, mask: Raster? = nil, skip: [UInt8]? = nil) {
         let ox = Int(origin.x), oy = Int(origin.y)
         for y in 0..<source.height where y + oy >= 0 && y + oy < height {
             for x in 0..<source.width where x + ox >= 0 && x + ox < width {
                 let s = (y * source.width + x) * 4, d = ((y+oy) * width + x+ox) * 4
+                if let mask {
+                    guard x < mask.width, y < mask.height else { continue }
+                    let m = (y * mask.width + x) * 4
+                    if mask.pixels[m + 3] < 128 { continue }
+                }
+                if let skip, Self.sameColor(pixels: source.pixels, index: s, color: skip) { continue }
                 let a = Int(source.pixels[s+3]), inv = 255-a
                 for c in 0..<4 { pixels[d+c] = UInt8(min(255, Int(source.pixels[s+c]) + (Int(pixels[d+c]) * inv + 127) / 255)) }
             }
         }
+    }
+    static func sameColor(pixels: [UInt8], index: Int, color: [UInt8]) -> Bool {
+        let a = Int(pixels[index + 3])
+        guard a > 16 else { return false }
+        for c in 0..<3 {
+            let straight = Int(pixels[index + c]) * 255 / a
+            if abs(straight - Int(color[c])) > 12 { return false }
+        }
+        return true
     }
     func cropped(_ rect: CGRect) -> Raster {
         let r = rect.integral.intersection(CGRect(x: 0, y: 0, width: width, height: height))
@@ -82,12 +97,67 @@ struct Raster {
         }
         return out
     }
-    mutating func clear(_ rect: CGRect) {
+    mutating func clear(_ rect: CGRect, mask: Raster? = nil) {
         let r = rect.integral.intersection(CGRect(x: 0, y: 0, width: width, height: height))
         guard !r.isNull else { return }
+        let originX = Int(rect.integral.minX), originY = Int(rect.integral.minY)
         for y in Int(r.minY)..<Int(r.maxY) { for x in Int(r.minX)..<Int(r.maxX) {
+            if let mask {
+                let mx = x - originX, my = y - originY
+                guard mx >= 0, my >= 0, mx < mask.width, my < mask.height,
+                      mask.pixels[(my * mask.width + mx) * 4 + 3] >= 128 else { continue }
+            }
             let i = (y*width+x)*4; pixels[i..<i+4] = [0,0,0,0][...]
         }}
+    }
+    func inverted() -> Raster {
+        var out = self
+        for i in stride(from: 0, to: out.pixels.count, by: 4) {
+            let a = Int(out.pixels[i + 3])
+            guard a > 0 else { continue }
+            for c in 0..<3 {
+                let straight = min(255, Int(out.pixels[i + c]) * 255 / a)
+                out.pixels[i + c] = UInt8((255 - straight) * a / 255)
+            }
+        }
+        return out
+    }
+    func grayscale() -> Raster {
+        var out = self
+        for i in stride(from: 0, to: out.pixels.count, by: 4) {
+            let a = Int(out.pixels[i + 3])
+            guard a > 0 else { continue }
+            let straight = (0..<3).map { Int(out.pixels[i + $0]) * 255 / a }
+            let y = (straight[0] * 30 + straight[1] * 59 + straight[2] * 11) / 100
+            for c in 0..<3 { out.pixels[i + c] = UInt8(y * a / 255) }
+        }
+        return out
+    }
+    func skewed(horizontal: Double, vertical: Double) -> Raster {
+        if abs(horizontal) < 0.01 && abs(vertical) < 0.01 { return self }
+        let hx = tan(horizontal * .pi / 180), vy = tan(vertical * .pi / 180)
+        let det = 1 - hx * vy
+        guard abs(det) > 0.05 else { return self }
+        let corners = [
+            CGPoint(x: 0, y: 0), CGPoint(x: width, y: 0),
+            CGPoint(x: 0, y: height), CGPoint(x: width, y: height)
+        ].map { CGPoint(x: $0.x + $0.y * hx, y: $0.y + $0.x * vy) }
+        let minX = corners.map(\.x).min() ?? 0, minY = corners.map(\.y).min() ?? 0
+        let maxX = corners.map(\.x).max() ?? 0, maxY = corners.map(\.y).max() ?? 0
+        let w = Int(ceil(maxX - minX)), h = Int(ceil(maxY - minY))
+        guard w > 0, h > 0, w <= 8192, h <= 8192, w * h <= 24_000_000 else { return self }
+        var out = Raster(w, h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let px = Double(x) + minX, py = Double(y) + minY
+                let sx = Int(((px - hx * py) / det).rounded())
+                let sy = Int(((py - vy * px) / det).rounded())
+                guard sx >= 0, sy >= 0, sx < width, sy < height else { continue }
+                let s = (sy * width + sx) * 4, d = (y * w + x) * 4
+                out.pixels.replaceSubrange(d..<d+4, with: pixels[s..<s+4])
+            }
+        }
+        return out
     }
     mutating func flood(_ point: CGPoint, color: NSColor, tolerance: Int = 12) {
         let x = Int(point.x), y = Int(point.y)
